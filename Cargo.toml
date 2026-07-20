@@ -2,7 +2,7 @@
 name = "quasar"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.87"
 description = "A Mamba-3 language model family and training harness for a single consumer GPU"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/uselessgoddess/quasar"
@@ -33,6 +33,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokenizers = { version = "0.23", default-features = false, features = ["onig", "progressbar"] }
 memmap2 = "0.9"
+# Every modern corpus on the Hub ships as parquet, and the harness is supposed
+# to take what the user downloaded. `default-features = false` drops arrow: the
+# row API reads a single string column without it.
+parquet = { version = "56", default-features = false, features = ["snap", "zstd", "brotli", "lz4"] }
 rand = "0.9"
 rand_chacha = "0.9"
 rayon = "1"

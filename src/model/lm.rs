@@ -122,10 +122,9 @@ mod tests {
         let cfg = config::Model::toy();
         let device = Device::default();
         let base = Tensor::<2, Int>::zeros([1, 8], &device);
-        let poked = base.clone().slice_assign(
-            [0..1, 2..3],
-            Tensor::<2, Int>::ones([1, 1], &device).mul_scalar(7),
-        );
+        let poked = base
+            .clone()
+            .slice_assign([0..1, 2..3], Tensor::<2, Int>::ones([1, 1], &device).mul_scalar(7));
         let model = Quasar::new(&cfg, &device);
 
         let delta = (model.forward(poked) - model.forward(base)).abs();

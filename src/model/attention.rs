@@ -5,7 +5,9 @@
 //! deliberately plain — no KV cache, no flash kernel — because it runs in one
 //! layer out of six or seven and is not where the time goes.
 
-use burn::nn::{Linear, LinearConfig, RmsNorm, RmsNormConfig, RotaryEncoding, RotaryEncodingConfig};
+use burn::nn::{
+    Linear, LinearConfig, RmsNorm, RmsNormConfig, RotaryEncoding, RotaryEncodingConfig,
+};
 use burn::prelude::*;
 use burn::tensor::activation::softmax;
 

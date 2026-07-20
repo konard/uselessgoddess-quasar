@@ -4,4 +4,5 @@
 //! [`model`] builds it, [`data`] feeds it, and [`train`] runs it.
 
 pub mod config;
+pub mod data;
 pub mod model;

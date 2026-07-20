@@ -21,7 +21,9 @@ impl Ffn {
     pub fn new(cfg: &config::Model, device: &Device) -> Self {
         let d_ff = cfg.d_ff();
         Self {
-            gate: SwiGluConfig::new(cfg.d_model, d_ff).with_initializer(init::normal()).init(device),
+            gate: SwiGluConfig::new(cfg.d_model, d_ff)
+                .with_initializer(init::normal())
+                .init(device),
             down: LinearConfig::new(d_ff, cfg.d_model)
                 .with_bias(false)
                 .with_initializer(init::residual(cfg.n_layers))

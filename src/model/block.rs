@@ -45,7 +45,9 @@ impl Block {
             // `SerialRecalculated` (the default path) recomputes the SSD
             // intermediates in the backward instead of storing them — the
             // difference between fitting 16 GB and not.
-            Mix::Ssm(ssm) => ssm.forward(self.norm_mix.forward(x.clone()), None, Mamba3SsdPath::default()).0,
+            Mix::Ssm(ssm) => {
+                ssm.forward(self.norm_mix.forward(x.clone()), None, Mamba3SsdPath::default()).0
+            }
             Mix::Attn(attn) => attn.forward(self.norm_mix.forward(x.clone())),
         };
         let x = x + mixed;
