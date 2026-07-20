@@ -5,10 +5,11 @@
 //! ids as memory-mapped `u16` so [`Batcher`] can draw windows without a copy.
 
 pub mod corpus;
+pub mod prepare;
 pub mod shard;
+pub mod tokenizer;
 
 mod batch;
-mod tokenizer;
 
 pub use batch::{Batch, Batcher};
 pub use corpus::Corpus;

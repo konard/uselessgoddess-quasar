@@ -18,6 +18,7 @@ burn = { git = "https://github.com/tracel-ai/burn.git", rev = "d028234e2ccd75c5c
     "dataset",
     "optim",
     "extension",
+    "store",
 ] }
 # The Mamba-3 SSD kernels: trapezoidal discretisation, data-dependent RoPE and
 # MIMO, with a memory-efficient custom backward. Reimplementing them would be
@@ -25,6 +26,13 @@ burn = { git = "https://github.com/tracel-ai/burn.git", rev = "d028234e2ccd75c5c
 burn-mamba = { git = "https://github.com/swfsql/burn-mamba.git", rev = "34b1e8d04794b5ac5f263a116990e421716193b6", default-features = false, features = [
     "mamba3",
     "autodiff",
+] }
+# Named directly only to switch on `burnpack`, which burn's own `store` feature
+# leaves off. Burnpack is the one format that preserves `ParamId`s, and without
+# them a reloaded model no longer matches its saved optimizer state.
+burn-store = { git = "https://github.com/tracel-ai/burn.git", rev = "d028234e2ccd75c5ca57d1c71ae74456e0e15c4f", default-features = false, features = [
+    "std",
+    "burnpack",
 ] }
 
 anyhow = "1"

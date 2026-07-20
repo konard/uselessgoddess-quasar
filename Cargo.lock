@@ -4453,6 +4453,7 @@ dependencies = [
  "approx",
  "burn",
  "burn-mamba",
+ "burn-store",
  "clap",
  "indicatif 0.17.11",
  "memmap2",
