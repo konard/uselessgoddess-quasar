@@ -67,10 +67,17 @@ flex = ["burn/flex", "burn-mamba/backend-flex"]
 ndarray = ["burn/ndarray", "burn-mamba/backend-ndarray"]
 # wgpu is the primary training backend on RDNA4: `vulkan` is the same CubeCL
 # runtime compiled to SPIR-V instead of WGSL, which AMD drivers do better on.
-wgpu = ["burn/wgpu", "burn/autotune", "burn/fusion", "burn-mamba/backend-wgpu"]
-vulkan = ["burn/vulkan", "burn/autotune", "burn/fusion", "burn-mamba/backend-vulkan"]
-rocm = ["burn/rocm", "burn/autotune", "burn/fusion", "burn-mamba/backend-rocm"]
-cuda = ["burn/cuda", "burn/autotune", "burn/fusion", "burn-mamba/backend-cuda"]
+#
+# `burn-mamba/fusion` goes with `burn/fusion` and is not optional: every GPU
+# backend of burn's is a `Fusion<CubeBackend<_>>`, and burn-mamba implements its
+# extension trait for `Fusion` only under that feature. Without it the extension
+# is missing for the very backend that was asked for, which is a compile error
+# inside burn-mamba rather than anything readable.
+gpu = ["burn/autotune", "burn/fusion", "burn-mamba/fusion"]
+wgpu = ["gpu", "burn/wgpu", "burn-mamba/backend-wgpu"]
+vulkan = ["gpu", "burn/vulkan", "burn-mamba/backend-vulkan"]
+rocm = ["gpu", "burn/rocm", "burn-mamba/backend-rocm"]
+cuda = ["gpu", "burn/cuda", "burn-mamba/backend-cuda"]
 
 [profile.release]
 opt-level = 3

@@ -66,6 +66,11 @@ which of the two is faster on RDNA4 is a question for a measurement, not for a
 README. It needs a ROCm installation whose `hipcc` knows the card's target
 (`gfx1201` for RX 9070 XT); `rocminfo` says what it is.
 
+All four GPU features go through `gpu`, which turns on fusion in burn *and* in
+burn-mamba together — burn's GPU backends are `Fusion<CubeBackend<_>>`, and
+burn-mamba only implements its SSD extension for `Fusion` when its own `fusion`
+feature is on.
+
 ## Trying it without a GPU
 
 ```sh

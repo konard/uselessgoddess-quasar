@@ -759,6 +759,7 @@ source = "git+https://github.com/swfsql/burn-mamba.git?rev=34b1e8d04794b5ac5f263
 dependencies = [
  "burn",
  "burn-cubecl",
+ "burn-fusion",
  "serde",
 ]
 
