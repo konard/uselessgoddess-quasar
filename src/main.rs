@@ -117,6 +117,12 @@ struct Overrides {
     save_every: Option<usize>,
     #[arg(long)]
     eval_every: Option<usize>,
+    /// Muon on the hidden matrices; `false` puts everything on AdamW.
+    #[arg(long)]
+    muon: Option<bool>,
+    /// Recompute activations in the backward.
+    #[arg(long)]
+    checkpointing: Option<bool>,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -174,6 +180,9 @@ fn budget(cfg: config::Model) -> Result<()> {
     // a preset fits 16 GB before a single activation is allocated.
     println!("states bf16      {:.2} GiB", gib(8.0));
     println!("states fp32      {:.2} GiB", gib(16.0));
+    // Muon keeps one momentum buffer where AdamW keeps two moments, and every
+    // matrix in the stack is on Muon — only the vocabulary and the norms are not.
+    println!("states muon      {:.2} GiB", gib(12.0));
     Ok(())
 }
 
@@ -247,7 +256,19 @@ impl Overrides {
         macro_rules! set {
             ($($field:ident),*) => {$(if let Some(value) = self.$field { run.$field = value; })*};
         }
-        set!(steps, micro_batch, accum, lr, warmup, decay, seed, save_every, eval_every);
+        set!(
+            steps,
+            micro_batch,
+            accum,
+            lr,
+            warmup,
+            decay,
+            seed,
+            save_every,
+            eval_every,
+            muon,
+            checkpointing
+        );
         run
     }
 }
