@@ -1,0 +1,74 @@
+[package]
+name = "quasar"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "A Mamba-3 language model family and training harness for a single consumer GPU"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/uselessgoddess/quasar"
+
+[dependencies]
+# burn's `main` (0.22-pre) rather than 0.21, pinned to the revision burn-mamba
+# builds against: the dispatch rewrite dropped the `B: Backend` type parameter
+# from `Tensor`, so the two APIs cannot be mixed inside one module tree. The
+# revision is the dependency's, not a choice -- moving it means moving both.
+burn = { git = "https://github.com/tracel-ai/burn.git", rev = "d028234e2ccd75c5ca57d1c71ae74456e0e15c4f", default-features = false, features = [
+    "std",
+    "autodiff",
+    "dataset",
+    "optim",
+    "extension",
+] }
+# The Mamba-3 SSD kernels: trapezoidal discretisation, data-dependent RoPE and
+# MIMO, with a memory-efficient custom backward. Reimplementing them would be
+# ~4k lines of tensor code whose correctness nothing here would check.
+burn-mamba = { git = "https://github.com/swfsql/burn-mamba.git", rev = "34b1e8d04794b5ac5f263a116990e421716193b6", default-features = false, features = [
+    "mamba3",
+    "autodiff",
+] }
+
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokenizers = { version = "0.23", default-features = false, features = ["onig", "progressbar"] }
+memmap2 = "0.9"
+rand = "0.9"
+rand_chacha = "0.9"
+rayon = "1"
+indicatif = "0.17"
+
+[dev-dependencies]
+approx = "0.5"
+tempfile = "3"
+
+[features]
+# CPU by default so `cargo test` needs no GPU. Flex is burn's own CPU backend on
+# `main`; ndarray is kept as an escape hatch for machines where Flex misbehaves.
+#
+# Every backend has to be named twice: burn-mamba dispatches its custom SSD
+# backward through a per-backend extension trait, and a backend it was not
+# compiled for panics with "Backend not supported for custom op" at the first
+# forward rather than failing to link.
+default = ["flex"]
+flex = ["burn/flex", "burn-mamba/backend-flex"]
+ndarray = ["burn/ndarray", "burn-mamba/backend-ndarray"]
+# wgpu is the primary training backend on RDNA4: `vulkan` is the same CubeCL
+# runtime compiled to SPIR-V instead of WGSL, which AMD drivers do better on.
+wgpu = ["burn/wgpu", "burn/autotune", "burn/fusion", "burn-mamba/backend-wgpu"]
+vulkan = ["burn/vulkan", "burn/autotune", "burn/fusion", "burn-mamba/backend-vulkan"]
+rocm = ["burn/rocm", "burn/autotune", "burn/fusion", "burn-mamba/backend-rocm"]
+cuda = ["burn/cuda", "burn/autotune", "burn/fusion", "burn-mamba/backend-cuda"]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+# The tests run real forward/backward passes; unoptimised CPU tensor code makes
+# the suite take minutes instead of seconds.
+[profile.test]
+opt-level = 2
+
+[profile.dev.package."*"]
+opt-level = 3

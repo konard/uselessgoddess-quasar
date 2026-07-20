@@ -1,0 +1,6 @@
+/target
+/artifacts
+/data
+/ci-logs
+*.bin
+*.parquet
