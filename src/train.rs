@@ -5,6 +5,7 @@ pub mod schedule;
 
 mod optim;
 mod run;
+mod ui;
 
 pub use optim::Optim;
 pub use run::{Error, Run, run};

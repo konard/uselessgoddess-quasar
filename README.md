@@ -37,6 +37,12 @@ at any point continues where it stopped. Overrides worth knowing:
 `--steps`, `--micro-batch`, `--accum`, `--lr`, `--warmup`, `--decay`,
 `--save-every`, `--eval-every`.
 
+When training is attached to a terminal it opens Burn's official TUI, with
+live plots for training/validation loss, perplexity, bits-per-byte, learning
+rate, throughput and tokens processed. Press `q`, then `s`, to stop cleanly;
+the loop writes a resumable checkpoint before exiting. Redirected output and CI
+keep the line-oriented logs instead.
+
 Two knobs decide whether a preset fits the card, and both are on by default:
 `--muon false` puts the hidden matrices back on AdamW (16 B/param of state
 instead of 12, which is what stopped `base` fitting 16 GB), and
@@ -46,6 +52,17 @@ memory back for about a third of the step time. See `docs/DESIGN.md` §3.
 Validation reports negative log-likelihood, perplexity and **bits-per-byte** —
 the last is the only figure comparable across tokenizers, and the one the design
 targets are written in.
+
+The first GPU step is not representative of training speed or peak live tensor
+memory. With the GPU features, Burn compiles fused kernels and benchmarks
+candidate implementations for the shapes it sees; utilization therefore comes
+in bursts while VRAM grows before the steady loop begins. The `states` values
+printed by `budget` cover weights, gradients, and optimizer state only. They do
+not include activations, fusion/autotuning workspaces, or the backend allocator's
+cache, all of which depend on `micro_batch` and can make a setting that fits that
+table exceed the card. Start at `--micro-batch 1`, then raise it only after the
+first optimizer step has completed; change `--accum` inversely if the effective
+token batch must remain fixed.
 
 ## Backends
 

@@ -19,6 +19,8 @@ burn = { git = "https://github.com/tracel-ai/burn.git", rev = "d028234e2ccd75c5c
     "optim",
     "extension",
     "store",
+    "train",
+    "tui",
 ] }
 # The Mamba-3 SSD kernels: trapezoidal discretisation, data-dependent RoPE and
 # MIMO, with a memory-efficient custom backward. Reimplementing them would be
