@@ -11,14 +11,13 @@ use std::io;
 use std::path::Path;
 use std::time::Instant;
 
-use burn::grad_clipping::GradientClippingConfig;
 use burn::module::AutodiffModule;
-use burn::optim::{AdamWConfig, GradientsAccumulator, GradientsParams};
 use burn::prelude::*;
 
 use crate::data::{Batcher, Shards};
 use crate::model::Quasar;
 use crate::train::checkpoint::{self, State};
+use crate::train::optim::Optim;
 use crate::train::schedule::Wsd;
 use crate::{config, eval};
 
@@ -51,6 +50,16 @@ pub struct Run {
     pub weight_decay: f32,
     #[config(default = 1.0)]
     pub clip: f32,
+    /// Orthogonalise the update of the hidden matrices instead of adapting it
+    /// per coordinate. One momentum buffer rather than two moments, which is
+    /// 4 B/param less state — see [`crate::train::Optim`].
+    #[config(default = true)]
+    pub muon: bool,
+    /// Recompute activations in the backward instead of keeping them. Trades
+    /// roughly a third more compute for the activation memory that decides
+    /// whether `base` fits at all.
+    #[config(default = true)]
+    pub checkpointing: bool,
     #[config(default = 1337)]
     pub seed: u64,
     #[config(default = 20)]
@@ -89,6 +98,9 @@ pub fn run(
 ) -> Result<(), Error> {
     let inference = device.clone();
     let device = device.clone().autodiff();
+    // Checkpointing is a property of the autodiff device: the graph keeps the
+    // inputs of a checkpointed span and replays it in the backward.
+    let device = if run.checkpointing { device.gradient_checkpointing() } else { device };
     device.seed(run.seed);
 
     let train = batcher(&data.join("train"), cfg.seq_len, run)?;
@@ -100,10 +112,7 @@ pub fn run(
     }
 
     let mut model = Quasar::new(cfg, &device);
-    let mut optim = AdamWConfig::new()
-        .with_weight_decay(run.weight_decay)
-        .with_grad_clipping(Some(GradientClippingConfig::Norm(run.clip)))
-        .init();
+    let mut optim = Optim::new(run, &model);
 
     std::fs::create_dir_all(out).map_err(Error::Io)?;
     cfg.save(out.join("model.json")).map_err(Error::Io)?;
@@ -118,7 +127,6 @@ pub fn run(
 
     let schedule = Wsd::new(run.lr, run.lr_floor, run.warmup, run.decay, run.steps);
     let per_step = (run.micro_batch * run.accum * cfg.seq_len) as u64;
-    let mut grads = GradientsAccumulator::new();
     let mut window = Window::new();
 
     for step in state.step..run.steps {
@@ -136,9 +144,9 @@ pub fn run(
             // Scaling here rather than after accumulating keeps the gradient of
             // an accumulated step identical to that of one big batch.
             let step = loss.total.div_scalar(run.accum as f64).backward();
-            grads.accumulate(&model, GradientsParams::from_grads(step, &model));
+            optim.accumulate(&model, step);
         }
-        model = optim.step(lr, model, grads.grads());
+        model = optim.step(lr, model);
         state = State { step: step + 1, tokens: state.tokens + per_step };
 
         if logging {

@@ -37,6 +37,12 @@ at any point continues where it stopped. Overrides worth knowing:
 `--steps`, `--micro-batch`, `--accum`, `--lr`, `--warmup`, `--decay`,
 `--save-every`, `--eval-every`.
 
+Two knobs decide whether a preset fits the card, and both are on by default:
+`--muon false` puts the hidden matrices back on AdamW (16 B/param of state
+instead of 12, which is what stopped `base` fitting 16 GB), and
+`--checkpointing false` stops recomputing activations in the backward, trading
+memory back for about a third of the step time. See `docs/DESIGN.md` §3.
+
 Validation reports negative log-likelihood, perplexity and **bits-per-byte** —
 the last is the only figure comparable across tokenizers, and the one the design
 targets are written in.
@@ -48,11 +54,17 @@ The default is a CPU backend, so `cargo test` needs no GPU. Training wants one:
 ```sh
 # RDNA4 and anything else with a Vulkan driver
 cargo run --release --no-default-features --features vulkan -- train tiny
+
+# the same card through ROCm/HIP, which needs the ROCm toolchain installed
+cargo run --release --no-default-features --features rocm -- train tiny
 ```
 
 Available: `flex` (CPU, default), `ndarray` (CPU), `wgpu`, `vulkan`, `rocm`,
 `cuda`. On AMD, `vulkan` is the same runtime as `wgpu` compiled to SPIR-V rather
-than WGSL, which the drivers handle better.
+than WGSL, which the drivers handle better; `rocm` goes through HIP instead, and
+which of the two is faster on RDNA4 is a question for a measurement, not for a
+README. It needs a ROCm installation whose `hipcc` knows the card's target
+(`gfx1201` for RX 9070 XT); `rocminfo` says what it is.
 
 ## Trying it without a GPU
 

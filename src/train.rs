@@ -3,7 +3,9 @@
 pub mod checkpoint;
 pub mod schedule;
 
+mod optim;
 mod run;
 
+pub use optim::Optim;
 pub use run::{Error, Run, run};
 pub use schedule::Wsd;
