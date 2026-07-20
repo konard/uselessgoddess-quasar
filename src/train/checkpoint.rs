@@ -38,12 +38,21 @@ pub fn save(
     optim: &ModuleOptimizer,
 ) -> Result<(), Error> {
     std::fs::create_dir_all(dir).map_err(Error::Io)?;
-    let mut store = BurnpackStore::from_file(dir.join("model.bpk"));
+    // Overwriting is the normal case, not an accident: a run resumed from the
+    // last checkpoint writes that same step again when it finishes.
+    let mut store = BurnpackStore::from_file(dir.join("model.bpk")).overwrite(true);
     model.save_into(&mut store).map_err(|e| Error::Store(e.to_string()))?;
     optim.save(dir.join("optim.bpk")).map_err(|e| Error::Store(e.to_string()))?;
 
     let json = serde_json::to_string_pretty(&state).map_err(io::Error::other).map_err(Error::Io)?;
     std::fs::write(dir.join("state.json"), json).map_err(Error::Io)
+}
+
+/// Fill `model` from `dir`, ignoring the optimizer — what inference needs.
+pub fn weights(dir: &Path, model: &mut Quasar) -> Result<(), Error> {
+    let mut store = BurnpackStore::from_file(dir.join("model.bpk"));
+    model.load_from(&mut store).map_err(|e| Error::Store(e.to_string()))?;
+    Ok(())
 }
 
 /// Fill `model` and `optim` from `dir`, returning where the run had got to.
@@ -52,8 +61,7 @@ pub fn load(
     model: &mut Quasar,
     optim: ModuleOptimizer,
 ) -> Result<(ModuleOptimizer, State), Error> {
-    let mut store = BurnpackStore::from_file(dir.join("model.bpk"));
-    model.load_from(&mut store).map_err(|e| Error::Store(e.to_string()))?;
+    weights(dir, model)?;
     let optim = optim.load(dir.join("optim.bpk")).map_err(|e| Error::Store(e.to_string()))?;
 
     let file = std::fs::File::open(dir.join("state.json")).map_err(Error::Io)?;

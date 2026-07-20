@@ -96,11 +96,16 @@ impl Tokenizer {
 
     /// Encode one document, terminated by [`EOS`].
     pub fn encode(&self, text: &str) -> Result<Vec<u16>, Error> {
-        let encoding =
-            self.inner.encode(text, false).map_err(|e| Error::Tokenizers(e.to_string()))?;
-        let mut ids: Vec<u16> = encoding.get_ids().iter().map(|&id| id as u16).collect();
+        let mut ids = self.encode_raw(text)?;
         ids.push(self.eos);
         Ok(ids)
+    }
+
+    /// Encode without the terminator, for a prompt that is to be continued.
+    pub fn encode_raw(&self, text: &str) -> Result<Vec<u16>, Error> {
+        let encoding =
+            self.inner.encode(text, false).map_err(|e| Error::Tokenizers(e.to_string()))?;
+        Ok(encoding.get_ids().iter().map(|&id| id as u16).collect())
     }
 
     pub fn decode(&self, ids: &[u16]) -> Result<String, Error> {

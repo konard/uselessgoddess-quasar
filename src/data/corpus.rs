@@ -63,7 +63,9 @@ impl Corpus {
     }
 }
 
-type Docs = Box<dyn Iterator<Item = Result<String, Error>>>;
+/// `Send` so the stream can feed the tokenizer trainer, which reads it from a
+/// rayon pool rather than the calling thread.
+type Docs = Box<dyn Iterator<Item = Result<String, Error>> + Send>;
 
 fn reader(path: &Path, field: &str) -> Result<Docs, Error> {
     match path.extension().and_then(|e| e.to_str()) {

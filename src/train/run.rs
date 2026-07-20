@@ -67,6 +67,13 @@ pub struct Run {
 pub enum Error {
     Io(io::Error),
     Checkpoint(checkpoint::Error),
+    /// The shards were tokenized with a different vocabulary than the model
+    /// was built for, which shows up as an out-of-bounds gather rather than
+    /// anything readable if it is allowed through.
+    Vocab {
+        config: usize,
+        shards: usize,
+    },
 }
 
 /// Train `cfg` on the shards under `data`, checkpointing into `out`.
@@ -86,6 +93,11 @@ pub fn run(
 
     let train = batcher(&data.join("train"), cfg.seq_len, run)?;
     let valid = batcher(&data.join("valid"), cfg.seq_len, run)?;
+
+    let shards = train.shards().meta().vocab_size;
+    if shards != cfg.vocab_size {
+        return Err(Error::Vocab { config: cfg.vocab_size, shards });
+    }
 
     let mut model = Quasar::new(cfg, &device);
     let mut optim = AdamWConfig::new()
@@ -157,7 +169,8 @@ fn due(step: usize, every: usize) -> bool {
     every > 0 && (step + 1).is_multiple_of(every)
 }
 
-/// The accumulator behind one log line.
+/// What one log line reports: the loss of the step that was measured, and the
+/// time since the previous line. The steps in between never leave the device.
 struct Window {
     loss: f64,
     started: Instant,
@@ -172,7 +185,7 @@ impl Window {
         let steps = run.log_every.max(1);
         let seconds = self.started.elapsed().as_secs_f64();
         let throughput = (steps as u64 * per_step) as f64 / seconds;
-        let loss = self.loss / steps as f64;
+        let loss = self.loss;
         format!(
             "step {}/{} | loss {loss:.4} | lr {lr:.2e} | {:.0} tok/s | {:.2}B tokens",
             state.step,
@@ -194,6 +207,9 @@ impl std::fmt::Display for Error {
         match self {
             Self::Io(error) => write!(f, "{error}"),
             Self::Checkpoint(error) => write!(f, "{error}"),
+            Self::Vocab { config, shards } => {
+                write!(f, "model vocabulary {config} does not match the shards' {shards}")
+            }
         }
     }
 }
