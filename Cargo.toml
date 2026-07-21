@@ -36,6 +36,15 @@ burn-store = { git = "https://github.com/tracel-ai/burn.git", rev = "d028234e2cc
     "std",
     "burnpack",
 ] }
+# Only for the hand-written CubeCL kernel (feature `cubecl-kernel`, pulled in by
+# `cpu`). `cubecl` must be a direct dependency: the `#[cube]` macro emits paths
+# rooted at `::cubecl`, which will not resolve through a re-export. `burn-cubecl`
+# exposes the raw `CubeBackend<R>`/`CubeTensor<R>` the kernel launches on. Both
+# are pinned to the exact revisions the rest of the graph already resolves to
+# (via `burn`/`burn-cpu`), so enabling them adds no version skew. Optional and
+# off by default -- they pull in the CubeCL CPU runtime (LLVM).
+cubecl = { git = "https://github.com/tracel-ai/cubecl", rev = "3beb9afaa0acf2d3f7b2dfff4ebf6dedfb316825", default-features = false, features = ["cpu"], optional = true }
+burn-cubecl = { git = "https://github.com/tracel-ai/burn.git", rev = "d028234e2ccd75c5ca57d1c71ae74456e0e15c4f", default-features = false, features = ["std"], optional = true }
 
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
@@ -76,14 +85,20 @@ ndarray = ["burn/ndarray", "burn-mamba/backend-ndarray"]
 # is missing for the very backend that was asked for, which is a compile error
 # inside burn-mamba rather than anything readable.
 gpu = ["burn/autotune", "burn/fusion", "burn-mamba/fusion"]
+# The hand-written CubeCL kernel (`src/kernel.rs`). Kept separate from the
+# backend features because it needs the raw `CubeBackend`/`CubeTensor` types and
+# the `#[cube]` macro's `::cubecl` crate root, which the backend features do not
+# expose on their own. Enabled by `cpu` so the `kernel` CI job can build and run
+# it; deliberately *not* enabled by `gpu`, to keep it off the default GPU builds.
+cubecl-kernel = ["dep:cubecl", "dep:burn-cubecl"]
 wgpu = ["gpu", "burn/wgpu", "burn-mamba/backend-wgpu"]
 # The real CubeCL CPU runtime (`Fusion<CubeBackend<CpuRuntime>>`, LLVM-JIT via
 # cubecl-cpu), as opposed to `flex`, which is a pure-Rust backend that never
 # compiles a `#[cube]` kernel. This is the only way to compile *and run* a
-# hand-written CubeCL kernel -- forward and backward -- on a CPU-only CI runner,
-# so it is what the `kernel` job uses to check the fused RMSNorm against its
-# tensor-op reference. Off by default because it pulls in LLVM.
-cpu = ["gpu", "burn/cpu", "burn-mamba/backend-cpu"]
+# hand-written CubeCL kernel on a CPU-only CI runner, so it is what the `kernel`
+# job uses to check the fused RMSNorm against its reference. It also pulls in
+# `cubecl-kernel` (the kernel itself). Off by default because it pulls in LLVM.
+cpu = ["gpu", "cubecl-kernel", "burn/cpu", "burn-mamba/backend-cpu"]
 vulkan = ["gpu", "burn/vulkan", "burn-mamba/backend-vulkan"]
 rocm = ["gpu", "burn/rocm", "burn-mamba/backend-rocm"]
 cuda = ["gpu", "burn/cuda", "burn-mamba/backend-cuda"]
