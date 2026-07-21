@@ -2,5 +2,7 @@
 /artifacts
 /data
 /ci-logs
+__pycache__/
+*.py[cod]
 *.bin
 *.parquet
