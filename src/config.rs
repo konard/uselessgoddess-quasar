@@ -9,7 +9,7 @@
 //! `docs/DESIGN.md` justifies each number.
 
 use burn::prelude::*;
-use burn_mamba::mamba3::prelude::Mamba3Config;
+use burn_mamba::mamba3::prelude::{Mamba3Config, Mamba3SsdPath};
 
 /// What mixes tokens in a layer.
 ///
@@ -59,6 +59,12 @@ pub struct Model {
     /// accepts 0.0, 0.5 or 1.0; 0.5 is what restores state tracking.
     #[config(default = 0.5)]
     pub rope_fraction: f64,
+    /// Chunk length of the SSD scan. `None` resolves to [`Model::ssd_chunk_len`],
+    /// which stays a divisor of [`Model::seq_len`] — burn-mamba pads the
+    /// sequence up to a multiple of this value, and a padded sequence costs six
+    /// extra `cat` allocations per SSM layer for tokens that are then discarded.
+    #[config(default = "None")]
+    pub ssd_chunk: Option<usize>,
 
     // ── attention ────────────────────────────────────────────────────────────
     /// Every `attn_period`-th layer is attention instead of SSM; `None` gives a
@@ -130,6 +136,30 @@ impl Model {
             .with_tied_embeddings(false)
     }
 
+    /// `quasar-tiny-turbo`, 78M — the cheapest model still worth training.
+    ///
+    /// Every cut here is one the memory accounting says is paid for twice, in
+    /// activations and in FLOPs, and none of them is a quality knob of the first
+    /// order: `mimo_rank 1` divides the intra-chunk SSD tensors by four,
+    /// `state_rank 64` halves the retained `B`/`C`, a 256-token window scores a
+    /// fifth of the pairs a 1024 one does, and a 1024-token sequence halves what
+    /// is left. `docs/MEMORY.md` has the per-knob arithmetic. What it buys is a
+    /// micro-batch above one on 16 GB, which is where the throughput was lost.
+    pub fn tiny_turbo() -> Self {
+        Self::new(32_768, 512, 20)
+            .with_seq_len(1024)
+            .with_state_rank(64)
+            .with_head_dim(64)
+            .with_n_groups(1)
+            .with_mimo_rank(1)
+            .with_attn_period(Some(5))
+            .with_attn_heads(8)
+            .with_attn_kv_heads(2)
+            .with_attn_window(Some(256))
+            .with_ffn_mult(2.0)
+            .with_tied_embeddings(true)
+    }
+
     /// A model small enough to train a few steps inside a unit test.
     pub fn toy() -> Self {
         Self::new(64, 32, 4)
@@ -181,6 +211,27 @@ impl Model {
             // The per-head gated RMSNorm before `out_proj` keeps the output
             // scale stable once MIMO sums several read channels into it.
             .with_has_outproj_norm(true)
+    }
+
+    /// The resolved SSD chunk length.
+    ///
+    /// burn-mamba's rule of thumb is `√(state_rank · head_dim)` rounded up to a
+    /// multiple of 32 (`Mamba3SsdPath::optimal_chunk_len`), and its scan pads the
+    /// sequence up to a multiple of whatever chunk length it is given. For `tiny`
+    /// that rule yields 96, which does not divide 2048: every SSM layer would pad
+    /// 2048 → 2112 and build six concatenated copies of its largest tensors to do
+    /// it. The default here is therefore the largest divisor of `seq_len` not
+    /// exceeding the rule's value — 64 for `tiny` — which removes the padding and
+    /// shrinks the `[chunk, chunk]` intra-chunk scores at the same time.
+    pub fn ssd_chunk_len(&self) -> usize {
+        if let Some(chunk) = self.ssd_chunk {
+            return chunk.max(1);
+        }
+        let optimal = Mamba3SsdPath::optimal_chunk_len(self.state_rank, self.head_dim);
+        (1..=optimal.min(self.seq_len))
+            .rev()
+            .find(|chunk| self.seq_len.is_multiple_of(*chunk))
+            .unwrap_or(optimal)
     }
 
     pub fn validate(&self) -> Result<(), Invalid> {
@@ -254,6 +305,84 @@ impl Model {
         let d = self.d_model;
         let head = d / self.attn_heads;
         2 * d * d + 2 * d * (self.attn_kv_heads * head) + 2 * head
+    }
+
+    /// Score pairs one attention layer materialises for a whole sequence.
+    ///
+    /// This is the loop in `model::attention::Attention::windowed` written as
+    /// arithmetic: block `i` holds `[block, keys]` scores, and the mask decides
+    /// nothing about the allocation. A window wider than the sequence — or none
+    /// at all — falls back to the dense `t²`.
+    pub fn attn_pairs(&self) -> usize {
+        let seq = self.seq_len;
+        match self.attn_window {
+            Some(w) if w < seq => (0..seq)
+                .step_by(w)
+                .map(|start| {
+                    let end = (start + w).min(seq);
+                    (end - start) * (end - (start + 1).saturating_sub(w))
+                })
+                .sum(),
+            _ => seq * seq,
+        }
+    }
+
+    /// Activation bytes one micro-batch holds until its backward, in fp32.
+    ///
+    /// An estimate, not a measurement — burn fuses and frees on its own schedule
+    /// and `--checkpointing` trades some of this back for recompute. It counts
+    /// what the pinned code demonstrably keeps: the SSD leaves that
+    /// `SerialRecalculated` retains (`v`, `B`, `C`, `dA`, `γ`, `scale`) rather
+    /// than the intra-chunk tensors it recomputes, the in-projection and gated
+    /// out-norm around them, the attention scores and their softmax, the SwiGLU
+    /// intermediates, and the two vocabulary-wide tensors of the loss. It is
+    /// meant for the question the OOM actually asks — which micro-batch fits —
+    /// and `docs/MEMORY.md` derives every term.
+    pub fn activations(&self, batch: usize) -> Activations {
+        let (d, seq) = (self.d_model, self.seq_len);
+        let (heads, m, r, p) = (self.n_heads(), self.mimo_rank, self.state_rank, self.head_dim);
+        let bytes = |per_token: usize| (batch * seq * per_token * 4) as f64;
+
+        // Per SSM layer: the in-projection output, the six retained SSD leaves,
+        // the gated RMSNorm chain (x, x², mean, rms, silu(z), product) and the
+        // out-projection.
+        let ssm_layer = self.mamba().d_in_proj()
+            + m * heads * p
+            + 2 * m * heads * r
+            + 3 * heads
+            + 6 * self.d_inner()
+            + d;
+        // Per attention layer: q, k, v and their rope and repeat copies, then the
+        // scores and the softmax over them — the term that grows with the window.
+        let attn_layer = 6 * d + 2 * self.attn_heads * self.attn_pairs() / seq;
+        // Per layer: two norms, the residual, and SwiGLU's gate, up, silu and
+        // product.
+        let block = 4 * d + 4 * self.d_ff();
+
+        let (mut ssm, mut attention) = (0.0, 0.0);
+        for layer in 0..self.n_layers {
+            match self.mixer(layer) {
+                Mixer::Ssm => ssm += bytes(ssm_layer),
+                Mixer::Attention => attention += bytes(attn_layer),
+            }
+        }
+        // The logits and their log-softmax, both vocabulary-wide and both alive
+        // until the backward.
+        let head = bytes(2 * self.vocab_size + d);
+        let ffn = bytes(self.n_layers * block);
+
+        Activations { ssm, attention, ffn, head, total: ssm + attention + ffn + head }
+    }
+
+    /// The largest micro-batch whose states and activations fit `bytes`.
+    ///
+    /// `per_param` is the optimizer's cost per parameter — 12 B for Muon on the
+    /// hidden matrices, 16 B for pure fp32 AdamW. Zero means nothing fits, which
+    /// is the honest answer when the states alone are over budget.
+    pub fn micro_batch_within(&self, bytes: f64, per_param: f64) -> usize {
+        let states = self.budget().total as f64 * per_param;
+        let one = self.activations(1).total;
+        if states + one > bytes { 0 } else { ((bytes - states) / one) as usize }
     }
 
     /// Forward FLOPs per token, counting a multiply-add as two.
@@ -346,6 +475,27 @@ impl std::fmt::Display for Budget {
     }
 }
 
+/// An activation budget, in bytes per micro-batch.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Activations {
+    pub ssm: f64,
+    pub attention: f64,
+    pub ffn: f64,
+    pub head: f64,
+    pub total: f64,
+}
+
+impl std::fmt::Display for Activations {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mib = |bytes: f64| bytes / (1u64 << 20) as f64;
+        writeln!(f, "ssm       {:>9.0} MiB", mib(self.ssm))?;
+        writeln!(f, "attention {:>9.0} MiB", mib(self.attention))?;
+        writeln!(f, "ffn       {:>9.0} MiB", mib(self.ffn))?;
+        writeln!(f, "head      {:>9.0} MiB", mib(self.head))?;
+        write!(f, "total     {:>9.0} MiB", mib(self.total))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,6 +534,78 @@ mod tests {
         Model::tiny().validate().unwrap();
         Model::base().validate().unwrap();
         Model::toy().validate().unwrap();
+        Model::tiny_turbo().validate().unwrap();
+    }
+
+    #[test]
+    fn turbo_is_the_smaller_and_cheaper_tiny() {
+        let (tiny, turbo) = (Model::tiny(), Model::tiny_turbo());
+
+        assert!(turbo.budget().total < tiny.budget().total);
+        assert!(turbo.flops_per_token() < tiny.flops_per_token());
+        assert!(
+            turbo.activations(1).total * 4.0 < tiny.activations(1).total,
+            "turbo {:.0} MiB vs tiny {:.0} MiB",
+            turbo.activations(1).total / 1048576.0,
+            tiny.activations(1).total / 1048576.0
+        );
+    }
+
+    #[test]
+    fn a_window_narrower_than_the_sequence_scores_fewer_pairs() {
+        let cfg = Model::tiny();
+        let dense = cfg.clone().with_attn_window(None).attn_pairs();
+
+        assert_eq!(dense, cfg.seq_len * cfg.seq_len);
+        assert!(cfg.attn_pairs() < dense, "the default 1024 window");
+        assert!(cfg.clone().with_attn_window(Some(256)).attn_pairs() * 4 < dense);
+    }
+
+    #[test]
+    fn activations_scale_with_the_micro_batch() {
+        let cfg = Model::tiny();
+
+        let (one, four) = (cfg.activations(1), cfg.activations(4));
+
+        assert!((four.total - 4.0 * one.total).abs() < 1.0);
+    }
+
+    /// The `tiny` run in issue #11 held `micro_batch 1` and OOM'd above it. The
+    /// estimate reproduces that for the dense scores the old attention built —
+    /// `attn_window = None` is exactly what a mask-only window cost — and shows
+    /// where the fixes move the line.
+    #[test]
+    fn the_estimate_reproduces_the_reported_ceiling() {
+        let gib = (16u64 << 30) as f64;
+        let dense = Model::tiny().with_attn_window(None);
+
+        assert_eq!(dense.micro_batch_within(gib, 12.0), 1, "what the issue reported");
+        assert_eq!(Model::tiny().micro_batch_within(gib, 12.0), 2, "blocking the window");
+        assert!(Model::tiny_turbo().micro_batch_within(gib, 12.0) >= 8, "turbo leaves room");
+    }
+
+    #[test]
+    fn the_ssd_chunk_divides_the_sequence() {
+        for cfg in [Model::tiny(), Model::base(), Model::toy()] {
+            let (chunk, seq) = (cfg.ssd_chunk_len(), cfg.seq_len);
+
+            assert!(seq.is_multiple_of(chunk), "chunk {chunk} pads a {seq}-token sequence");
+        }
+    }
+
+    #[test]
+    fn the_default_ssd_chunk_stays_under_burn_mambas_rule() {
+        let cfg = Model::tiny();
+
+        let rule = Mamba3SsdPath::optimal_chunk_len(cfg.state_rank, cfg.head_dim);
+
+        assert_eq!(rule, 96, "burn-mamba's own rule of thumb for tiny");
+        assert_eq!(cfg.ssd_chunk_len(), 64, "the largest divisor of 2048 below it");
+    }
+
+    #[test]
+    fn an_explicit_ssd_chunk_overrides_the_default() {
+        assert_eq!(Model::tiny().with_ssd_chunk(Some(128)).ssd_chunk_len(), 128);
     }
 
     #[test]

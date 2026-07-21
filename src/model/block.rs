@@ -24,6 +24,9 @@ pub struct Block {
     mix: Mix,
     norm_ffn: RmsNorm,
     ffn: Ffn,
+    /// Chunk length of the SSD scan, resolved once at build time so the forward
+    /// never falls back to burn-mamba's `None` (which pads the sequence).
+    ssd_chunk: usize,
 }
 
 impl Block {
@@ -37,16 +40,21 @@ impl Block {
             mix,
             norm_ffn: RmsNormConfig::new(cfg.d_model).init(device),
             ffn: Ffn::new(cfg, device),
+            ssd_chunk: cfg.ssd_chunk_len(),
         }
     }
 
     pub fn forward(&self, x: Tensor<3>) -> Tensor<3> {
         let mixed = match &self.mix {
-            // `SerialRecalculated` (the default path) recomputes the SSD
-            // intermediates in the backward instead of storing them — the
-            // difference between fitting 16 GB and not.
+            // `SerialRecalculated` recomputes the SSD intermediates in the
+            // backward instead of storing them — the difference between fitting
+            // 16 GB and not. The chunk length is passed explicitly: left unset,
+            // burn-mamba picks √(state_rank · head_dim) rounded to 32, which for
+            // the shipped presets does not divide `seq_len` and makes every SSM
+            // layer pad its sequence with six `cat` allocations.
             Mix::Ssm(ssm) => {
-                ssm.forward(self.norm_mix.forward(x.clone()), None, Mamba3SsdPath::default()).0
+                let path = Mamba3SsdPath::SerialRecalculated(Some(self.ssd_chunk));
+                ssm.forward(self.norm_mix.forward(x.clone()), None, path).0
             }
             Mix::Attn(attn) => attn.forward(self.norm_mix.forward(x.clone())),
         };

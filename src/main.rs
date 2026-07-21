@@ -28,6 +28,11 @@ enum Command {
     Budget {
         #[arg(value_enum, default_value_t = Preset::Tiny)]
         preset: Preset,
+        /// Micro-batch the activation estimate is for.
+        #[arg(long, default_value_t = 1)]
+        micro_batch: usize,
+        #[command(flatten)]
+        shape: Shape,
     },
     /// Fit a byte-level BPE vocabulary on the corpus.
     Tokenizer {
@@ -66,6 +71,8 @@ enum Command {
         out: PathBuf,
         #[command(flatten)]
         run: Overrides,
+        #[command(flatten)]
+        shape: Shape,
     },
     /// Score a checkpoint on the validation shards.
     Eval {
@@ -125,16 +132,45 @@ struct Overrides {
     checkpointing: Option<bool>,
 }
 
+/// The model-shape knobs worth sweeping without editing a preset, because they
+/// are the ones that decide whether a micro-batch fits. `quasar budget` answers
+/// that before a run allocates anything.
+#[derive(Args, Clone)]
+struct Shape {
+    #[arg(long)]
+    seq_len: Option<usize>,
+    #[arg(long)]
+    state_rank: Option<usize>,
+    #[arg(long)]
+    mimo_rank: Option<usize>,
+    #[arg(long)]
+    expand: Option<usize>,
+    /// Sliding-window radius; `0` means full causal attention.
+    #[arg(long)]
+    attn_window: Option<usize>,
+    /// Attention every n-th layer; `0` means a pure-SSM stack.
+    #[arg(long)]
+    attn_period: Option<usize>,
+    /// SSD scan chunk length; unset keeps the largest divisor of `seq_len`
+    /// below burn-mamba's own rule of thumb.
+    #[arg(long)]
+    ssd_chunk: Option<usize>,
+}
+
 #[derive(Clone, Copy, ValueEnum)]
 enum Preset {
     Tiny,
+    /// `tiny`, cut down to what trains fastest inside 16 GB.
+    TinyTurbo,
     Base,
     Toy,
 }
 
 fn main() -> Result<()> {
     match Cli::parse().command {
-        Command::Budget { preset } => budget(preset.config()),
+        Command::Budget { preset, micro_batch, shape } => {
+            budget(shape.apply(preset.config()), micro_batch)
+        }
         Command::Tokenizer { corpus, out, vocab_size, docs, field } => {
             tokenizer(&corpus, &out, vocab_size, docs, &field)
         }
@@ -146,11 +182,11 @@ fn main() -> Result<()> {
             println!("valid {} tokens", prepared.valid.tokens);
             Ok(())
         }
-        Command::Train { preset, data, out, run } => {
+        Command::Train { preset, data, out, run, shape } => {
             // The tokenizer decides the vocabulary, not the preset: a corpus
             // whose BPE stopped short of the requested merges is common, and
             // silently building a wider embedding would be dead parameters.
-            let mut cfg = preset.config();
+            let mut cfg = shape.apply(preset.config());
             cfg.vocab_size = Shards::open(&data.join("train"))?.meta().vocab_size;
             let run = run.apply(train::Run::new());
             train::run(&cfg, &run, &data, &out, &Device::default())?;
@@ -164,8 +200,9 @@ fn main() -> Result<()> {
     }
 }
 
-/// What a preset costs, in the three currencies that decide whether it fits.
-fn budget(cfg: config::Model) -> Result<()> {
+/// What a preset costs, in the currencies that decide whether it fits.
+fn budget(cfg: config::Model, micro_batch: usize) -> Result<()> {
+    cfg.validate()?;
     let budget = cfg.budget();
     let params = budget.total as f64;
     let gib = |bytes_per_param: f64| params * bytes_per_param / (1 << 30) as f64;
@@ -173,6 +210,8 @@ fn budget(cfg: config::Model) -> Result<()> {
 
     println!("{budget}\n");
     println!("seq_len          {}", cfg.seq_len);
+    println!("ssd chunk        {}", cfg.ssd_chunk_len());
+    println!("attn keys/query  {}", cfg.attn_pairs() / cfg.seq_len);
     println!("fwd FLOPs/token  {:.1}M", flops / 1e6);
     println!("step FLOPs/token {:.1}M", 3.0 * flops / 1e6);
     // Weights, gradients and two Adam moments. Pure bf16 is 8 B/param; keeping
@@ -183,6 +222,15 @@ fn budget(cfg: config::Model) -> Result<()> {
     // Muon keeps one momentum buffer where AdamW keeps two moments, and every
     // matrix in the stack is on Muon — only the vocabulary and the norms are not.
     println!("states muon      {:.2} GiB", gib(12.0));
+
+    // States are the easy half: they are the same every step. The activations
+    // are what an OOM at `micro_batch 2` is actually about, so they get their own
+    // breakdown and the micro-batch the card has room for.
+    let sixteen = (16u64 << 30) as f64;
+    println!("\nactivations at micro_batch {micro_batch} (fp32, estimated)");
+    println!("{}", cfg.activations(micro_batch));
+    println!("\nmicro_batch in 16 GiB, muon states {}", cfg.micro_batch_within(sixteen, 12.0));
+    println!("micro_batch in 16 GiB, fp32 adamw  {}", cfg.micro_batch_within(sixteen, 16.0));
     Ok(())
 }
 
@@ -245,9 +293,31 @@ impl Preset {
     fn config(self) -> config::Model {
         match self {
             Self::Tiny => config::Model::tiny(),
+            Self::TinyTurbo => config::Model::tiny_turbo(),
             Self::Base => config::Model::base(),
             Self::Toy => config::Model::toy(),
         }
+    }
+}
+
+impl Shape {
+    fn apply(&self, mut cfg: config::Model) -> config::Model {
+        macro_rules! set {
+            ($($field:ident),*) => {$(if let Some(value) = self.$field { cfg.$field = value; })*};
+        }
+        set!(seq_len, state_rank, mimo_rank, expand);
+        // `0` is how a flag says "none" — clap has no `--attn-window=` spelling
+        // for `Option<usize>` inside an `Option`.
+        if let Some(window) = self.attn_window {
+            cfg.attn_window = (window > 0).then_some(window);
+        }
+        if let Some(period) = self.attn_period {
+            cfg.attn_period = (period > 0).then_some(period);
+        }
+        if let Some(chunk) = self.ssd_chunk {
+            cfg.ssd_chunk = Some(chunk);
+        }
+        cfg
     }
 }
 
