@@ -25,6 +25,24 @@ jobs:
       - run: cargo test --all-targets
       - run: cargo run --release -- budget tiny
 
+  # The custom CubeCL kernel cannot be exercised on the pure-Rust `flex` backend
+  # the `check` job uses. The CubeCL CPU runtime (`cpu` feature) is the same
+  # runtime family as the GPU backends, only LLVM-targeted, so it runs a real
+  # `#[cube]` kernel -- forward and backward -- on a GPU-less runner. This job
+  # checks the fused RMSNorm against its tensor-op reference there, and probes
+  # (in `tests/cubecl_cpu.rs`) that the whole model runs on the backend at all.
+  kernel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # SPIR-V/WGSL toolchains are not needed: the CPU runtime JITs through LLVM,
+      # which the toolchain already ships.
+      - run: cargo test --features cpu --test cubecl_cpu -- --nocapture
+        env:
+          BURN_DEVICE: cpu
+
   smoke:
     runs-on: ubuntu-latest
     steps:

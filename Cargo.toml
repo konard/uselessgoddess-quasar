@@ -77,6 +77,13 @@ ndarray = ["burn/ndarray", "burn-mamba/backend-ndarray"]
 # inside burn-mamba rather than anything readable.
 gpu = ["burn/autotune", "burn/fusion", "burn-mamba/fusion"]
 wgpu = ["gpu", "burn/wgpu", "burn-mamba/backend-wgpu"]
+# The real CubeCL CPU runtime (`Fusion<CubeBackend<CpuRuntime>>`, LLVM-JIT via
+# cubecl-cpu), as opposed to `flex`, which is a pure-Rust backend that never
+# compiles a `#[cube]` kernel. This is the only way to compile *and run* a
+# hand-written CubeCL kernel -- forward and backward -- on a CPU-only CI runner,
+# so it is what the `kernel` job uses to check the fused RMSNorm against its
+# tensor-op reference. Off by default because it pulls in LLVM.
+cpu = ["gpu", "burn/cpu", "burn-mamba/backend-cpu"]
 vulkan = ["gpu", "burn/vulkan", "burn-mamba/backend-vulkan"]
 rocm = ["gpu", "burn/rocm", "burn-mamba/backend-rocm"]
 cuda = ["gpu", "burn/cuda", "burn-mamba/backend-cuda"]
