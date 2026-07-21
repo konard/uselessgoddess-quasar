@@ -159,6 +159,30 @@ class ModelConfig:
     norms = (2 * self.n_layers + 1) * d
     return embedding + head + ssm + attention + ffn + norms
 
+  def flops_per_token(self) -> float:
+    """Approximate forward FLOPs, counting a multiply-add as two."""
+    d = self.d_model
+    angles = int(self.state_rank * self.rope_fraction) // 2
+    in_projection = (
+      2 * self.d_inner
+      + 2 * self.state_rank * self.n_groups
+      + 3 * self.ssm_heads
+      + angles
+    )
+    ssm_state = self.ssm_heads * self.head_dim * self.state_rank
+    ssm = 2 * d * (in_projection + self.d_inner) + 4 * ssm_state
+    head_dim = d // self.attn_heads
+    kv = self.attn_kv_heads * head_dim
+    span = min(self.attn_window or self.seq_len, self.seq_len)
+    attention = 2 * d * (2 * d + 2 * kv) + 4 * span * d
+    mixers = (
+      (self.n_layers - len(self.attention_layers)) * ssm
+      + len(self.attention_layers) * attention
+    )
+    ffn = self.n_layers * 6 * d * self.d_ff
+    unembedding = 2 * d * self.vocab_size
+    return float(mixers + ffn + unembedding)
+
   def as_dict(self) -> dict[str, Any]:
     return asdict(self)
 
@@ -182,6 +206,29 @@ class RunConfig:
   checkpointing: bool = True
   compile: bool = False
   dtype: str = "bfloat16"
+
+  def validate(self) -> None:
+    positive = {
+      "steps": self.steps,
+      "micro_batch": self.micro_batch,
+      "accum": self.accum,
+      "lr": self.lr,
+      "log_every": self.log_every,
+      "eval_batches": self.eval_batches,
+    }
+    for name, value in positive.items():
+      if value <= 0:
+        raise ValueError(f"{name} must be positive")
+    if self.warmup < 0 or self.decay < 0 or self.warmup + self.decay > self.steps:
+      raise ValueError("warmup and decay must be non-negative and fit within steps")
+    if not 0.0 <= self.lr_floor <= 1.0:
+      raise ValueError("lr_floor must be between zero and one")
+    if self.weight_decay < 0.0 or self.clip < 0.0:
+      raise ValueError("weight_decay and clip must be non-negative")
+    if self.save_every < 0 or self.eval_every < 0:
+      raise ValueError("save_every and eval_every must be non-negative")
+    if self.dtype not in {"bfloat16", "float32"}:
+      raise ValueError(f"unsupported dtype {self.dtype!r}")
 
   def tokens_per_step(self, model: ModelConfig) -> int:
     return self.micro_batch * self.accum * model.seq_len

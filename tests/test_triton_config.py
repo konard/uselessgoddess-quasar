@@ -21,6 +21,10 @@ class TritonPresetTest(unittest.TestCase):
     self.assertEqual(run.tokens_per_step(model), 262_144)
     self.assertTrue(3_000_000_000 <= run.total_tokens(model) <= 3_500_000_000)
 
+  def test_invalid_run_fails_before_allocating_a_model(self):
+    with self.assertRaisesRegex(ValueError, "warmup and decay"):
+      RunConfig(steps=10, warmup=6, decay=5).validate()
+
 
 if __name__ == "__main__":
   unittest.main()
