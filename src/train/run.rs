@@ -2,10 +2,9 @@
 //!
 //! Everything the loop needs is a pure function of the step index — the batch,
 //! the learning rate, the schedule — so a crashed run resumes into exactly the
-//! stream it left. The loop itself is deliberately a plain `for`: burn's
-//! `Learner` owns its own metrics, renderer and checkpointing, none of which
-//! survive contact with a run that has to report bits-per-byte and be stopped
-//! whenever the card is wanted for something else.
+//! stream it left. The loop itself stays a plain `for`: Burn's official metric
+//! renderer is driven from [`super::ui`] without handing it the custom Muon /
+//! AdamW optimizer split or the deterministic checkpoint lifecycle.
 
 use std::io;
 use std::path::Path;
@@ -19,6 +18,7 @@ use crate::model::Quasar;
 use crate::train::checkpoint::{self, State};
 use crate::train::optim::Optim;
 use crate::train::schedule::Wsd;
+use crate::train::ui::Dashboard;
 use crate::{config, eval};
 
 /// Everything about a run that is not the model itself.
@@ -128,6 +128,14 @@ pub fn run(
     let schedule = Wsd::new(run.lr, run.lr_floor, run.warmup, run.decay, run.steps);
     let per_step = (run.micro_batch * run.accum * cfg.seq_len) as u64;
     let mut window = Window::new();
+    let mut dashboard = Dashboard::new(run.steps, state.step);
+
+    #[cfg(feature = "gpu")]
+    if !dashboard.active() {
+        println!(
+            "warming up GPU kernels; Burn compiles, fuses and autotunes the first step before steady training"
+        );
+    }
 
     for step in state.step..run.steps {
         let lr = schedule.lr(step);
@@ -148,22 +156,36 @@ pub fn run(
         }
         model = optim.step(lr, model);
         state = State { step: step + 1, tokens: state.tokens + per_step };
+        window.steps += 1;
 
         if logging {
-            println!("{}", window.report(state, run, lr, per_step));
+            let report = window.report(state, run, lr, per_step);
+            dashboard.train(state.step, report.loss, report.lr, report.throughput, report.tokens);
+            if !dashboard.active() {
+                println!("{report}");
+            }
             window = Window::new();
         }
         if due(step, run.eval_every) {
             let report = eval::evaluate(&model.valid(), &valid, run.eval_batches, &inference);
-            println!("  valid: {report}");
+            dashboard.valid(report);
+            if !dashboard.active() {
+                println!("  valid: {report}");
+            }
         }
         if due(step, run.save_every) {
             checkpoint::save(&checkpoint::dir(out, state.step), state, &model, &optim)?;
         }
+        if dashboard.should_stop() {
+            break;
+        }
     }
 
     checkpoint::save(&checkpoint::dir(out, state.step), state, &model, &optim)?;
-    println!("final: {}", eval::evaluate(&model.valid(), &valid, run.eval_batches, &inference));
+    let final_report = eval::evaluate(&model.valid(), &valid, run.eval_batches, &inference);
+    dashboard.valid(final_report);
+    dashboard.finish();
+    println!("final: {final_report}");
     Ok(())
 }
 
@@ -181,25 +203,49 @@ fn due(step: usize, every: usize) -> bool {
 /// time since the previous line. The steps in between never leave the device.
 struct Window {
     loss: f64,
+    steps: usize,
     started: Instant,
 }
 
 impl Window {
     fn new() -> Self {
-        Self { loss: 0.0, started: Instant::now() }
+        Self { loss: 0.0, steps: 0, started: Instant::now() }
     }
 
-    fn report(&self, state: State, run: &Run, lr: f64, per_step: u64) -> String {
-        let steps = run.log_every.max(1);
+    fn report(&self, state: State, run: &Run, lr: f64, per_step: u64) -> TrainingReport {
         let seconds = self.started.elapsed().as_secs_f64();
-        let throughput = (steps as u64 * per_step) as f64 / seconds;
-        let loss = self.loss;
-        format!(
-            "step {}/{} | loss {loss:.4} | lr {lr:.2e} | {:.0} tok/s | {:.2}B tokens",
-            state.step,
-            run.steps,
+        let throughput = (self.steps as u64 * per_step) as f64 / seconds;
+        TrainingReport {
+            step: state.step,
+            steps: run.steps,
+            loss: self.loss,
+            lr,
             throughput,
-            state.tokens as f64 / 1e9,
+            tokens: state.tokens,
+        }
+    }
+}
+
+struct TrainingReport {
+    step: usize,
+    steps: usize,
+    loss: f64,
+    lr: f64,
+    throughput: f64,
+    tokens: u64,
+}
+
+impl std::fmt::Display for TrainingReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "step {}/{} | loss {loss:.4} | lr {lr:.2e} | {:.0} tok/s | {:.2}B tokens",
+            self.step,
+            self.steps,
+            self.throughput,
+            self.tokens as f64 / 1e9,
+            loss = self.loss,
+            lr = self.lr,
         )
     }
 }
