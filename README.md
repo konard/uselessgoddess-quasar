@@ -1,7 +1,9 @@
 # quasar
 
-A Mamba-3 language model family trained end to end on one consumer GPU, in Rust
-on [burn](https://github.com/tracel-ai/burn) + wgpu.
+A Mamba-3 language model family trained end to end on one consumer GPU. The
+portable pipeline is Rust on [burn](https://github.com/tracel-ai/burn) + wgpu;
+the maximum-throughput path calls upstream Mamba-3's fused Triton SSD forward
+and backward from PyTorch.
 
 Two presets, both hybrid stacks of Mamba-3 blocks with a sliding-window GQA
 layer every sixth or seventh position:
@@ -31,6 +33,21 @@ cargo run --release -- train tiny --data data/shards --out runs/tiny
 cargo run --release -- eval runs/tiny --data data/shards
 cargo run --release -- generate runs/tiny --prompt "The reason"
 ```
+
+For ROCm training with upstream `mamba3_siso_combined`, prepare the same shards
+and replace the training command with:
+
+```sh
+examples/install-triton-rocm.sh
+source .venv-triton/bin/activate
+python -m quasar_triton tiny --data data/shards --out runs/tiny-triton
+```
+
+This optimized preset is SISO (155.7M parameters for `tiny`): upstream currently
+implements SISO in Triton and MIMO in TileLang, so retaining the portable
+model's MIMO rank would not exercise the requested kernel. Installation,
+compatibility, resume behavior and a reproducible benchmark protocol are in
+[`docs/TRITON.md`](docs/TRITON.md).
 
 `train` resumes from the newest checkpoint under `--out`, so a run interrupted
 at any point continues where it stopped. Overrides worth knowing:
@@ -111,4 +128,5 @@ samples — the whole pipeline in under a minute on a CPU.
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
+python -m unittest discover
 ```

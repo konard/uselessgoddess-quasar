@@ -2,6 +2,7 @@
 /artifacts
 /data
 /ci-logs
+/.venv-triton
 __pycache__/
 *.py[cod]
 *.bin
