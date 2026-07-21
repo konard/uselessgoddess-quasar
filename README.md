@@ -3,16 +3,20 @@
 A Mamba-3 language model family trained end to end on one consumer GPU, in Rust
 on [burn](https://github.com/tracel-ai/burn) + wgpu.
 
-Two presets, both hybrid stacks of Mamba-3 blocks with a sliding-window GQA
-layer every sixth or seventh position:
+Three presets, all hybrid stacks of Mamba-3 blocks with a sliding-window GQA
+layer every fifth, sixth or seventh position:
 
-| | params | fwd FLOPs/token | states fp32 |
-| --- | --- | --- | --- |
-| `tiny` | 162.5M | 360.8M | 2.42 GiB |
-| `base` | 1117.5M | 2306.2M | 16.65 GiB |
+| | params | fwd FLOPs/token | states fp32 | activations / micro-batch | micro-batches in 16 GiB |
+| --- | --- | --- | --- | --- | --- |
+| `tiny-turbo` | 77.7M | 161.5M | 1.16 GiB | 1.61 GiB | 9 |
+| `tiny` | 162.5M | 360.8M | 2.42 GiB | 6.99 GiB | 2 |
+| `base` | 1117.5M | 2306.2M | 16.65 GiB | 24.48 GiB | 0 |
 
 `docs/DESIGN.md` justifies every number above, states the training-time budget
 honestly, and explains why this is not a mixture of experts.
+[`docs/MEMORY.md`](docs/MEMORY.md) takes apart the last two columns — where the
+VRAM actually goes, which burn-mamba setting moves it, and what `tiny-turbo`
+gives up to fit nine micro-batches where `tiny` fits two.
 
 ## Pipeline
 
@@ -64,13 +68,17 @@ targets are written in.
 The first GPU step is not representative of training speed or peak live tensor
 memory. With the GPU features, Burn compiles fused kernels and benchmarks
 candidate implementations for the shapes it sees; utilization therefore comes
-in bursts while VRAM grows before the steady loop begins. The `states` values
-printed by `budget` cover weights, gradients, and optimizer state only. They do
-not include activations, fusion/autotuning workspaces, or the backend allocator's
-cache, all of which depend on `micro_batch` and can make a setting that fits that
-table exceed the card. Start at `--micro-batch 1`, then raise it only after the
-first optimizer step has completed; change `--accum` inversely if the effective
-token batch must remain fixed.
+in bursts while VRAM grows before the steady loop begins. `budget` now prints an
+`activations` breakdown and the largest micro-batch that fits 16 GiB alongside
+the `states` figures, so the answer is available before a run allocates anything
+— but it is an analytic estimate of the tensors autodiff must retain, not a
+measurement, and it does not cover fusion/autotuning workspaces or the backend
+allocator's cache. `--micro-batch`, `--seq-len`, `--state-rank`, `--mimo-rank`,
+`--expand`, `--attn-window`, `--attn-period` and `--ssd-chunk` all work on
+`budget`, so a shape can be swept without rebuilding a preset. Still start at
+`--micro-batch 1` on new hardware and raise it once the first optimizer step has
+completed; change `--accum` inversely if the effective token batch must remain
+fixed.
 
 ## Backends
 
