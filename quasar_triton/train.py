@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import platform
 import sys
 import time
 from pathlib import Path
@@ -15,7 +14,7 @@ import torch
 import torch.nn.functional as F
 
 from .config import ModelConfig, RunConfig
-from .data import Batcher, Shards
+from .data import Batch, Batcher, Shards
 from .model import Quasar
 from .schedule import learning_rate
 
@@ -133,7 +132,7 @@ def _loss(
   return nll, z, nll + z_loss * z
 
 
-def _tensor_batch(batch: Any, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+def _tensor_batch(batch: Batch, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
   inputs = torch.tensor(batch.inputs, dtype=torch.long, device=device)
   targets = torch.tensor(batch.targets, dtype=torch.long, device=device)
   return inputs, targets
@@ -166,7 +165,7 @@ def _evaluate(
   return nll, z, bits_per_byte
 
 
-def _check_runtime(_dtype: torch.dtype) -> str:
+def _check_runtime() -> str:
   if not sys.platform.startswith("linux"):
     raise RuntimeError(
       "the official Mamba/Triton package targets Linux; native Windows ROCm wheels "
@@ -200,9 +199,10 @@ def train(preset: str, data: Path, out: Path, run: RunConfig) -> None:
     allocator = "expandable_segments:True"
     os.environ.setdefault("PYTORCH_ALLOC_CONF", allocator)
     os.environ.setdefault("PYTORCH_HIP_ALLOC_CONF", allocator)
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", allocator)
 
   dtype = {"bfloat16": torch.bfloat16, "float32": torch.float32}[run.dtype]
-  runtime = _check_runtime(dtype)
+  runtime = _check_runtime()
   device = torch.device("cuda")  # PyTorch intentionally uses this name for HIP too.
   torch.set_float32_matmul_precision("high")
   torch.manual_seed(run.seed)

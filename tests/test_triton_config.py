@@ -1,6 +1,5 @@
 import unittest
 
-
 from quasar_triton.config import ModelConfig, RunConfig
 
 
