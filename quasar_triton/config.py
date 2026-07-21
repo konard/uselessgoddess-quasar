@@ -190,8 +190,8 @@ class ModelConfig:
 @dataclass(frozen=True)
 class RunConfig:
   steps: int = 12_500
-  micro_batch: int = 8
-  accum: int = 16
+  micro_batch: int = 1
+  accum: int = 128
   lr: float = 3e-3
   lr_floor: float = 0.1
   warmup: int = 400
@@ -235,6 +235,10 @@ class RunConfig:
 
   def total_tokens(self, model: ModelConfig) -> int:
     return self.steps * self.tokens_per_step(model)
+
+  def steps_for_tokens(self, model: ModelConfig, tokens: int) -> int:
+    per_step = self.tokens_per_step(model)
+    return (tokens + per_step - 1) // per_step
 
   def as_dict(self) -> dict[str, Any]:
     return asdict(self)

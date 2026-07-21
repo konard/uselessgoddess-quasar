@@ -257,6 +257,15 @@ def train(preset: str, data: Path, out: Path, run: RunConfig) -> None:
       f"checkpointing={run.checkpointing} compile={run.compile}",
       flush=True,
     )
+    epoch_tokens = len(train_shards)
+    day_throughput = epoch_tokens / (24.0 * 3_600.0)
+    day_tflops = day_throughput * 3.0 * config.flops_per_token() / 1e12
+    print(
+      f"corpus_tokens={epoch_tokens:,} "
+      f"corpus_equivalent_steps={run.steps_for_tokens(config, epoch_tokens):,} "
+      f"24h_target_tok/s={day_throughput:,.0f} 24h_target_tflop/s={day_tflops:.2f}",
+      flush=True,
+    )
 
     optimizer.zero_grad(set_to_none=True)
     torch.cuda.synchronize()

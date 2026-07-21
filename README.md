@@ -43,7 +43,9 @@ source .venv-triton/bin/activate
 python -m quasar_triton tiny --data data/shards --out runs/tiny-triton
 ```
 
-This optimized preset is SISO (155.7M parameters for `tiny`): upstream currently
+This optimized preset defaults to `tiny`, micro-batch 1 and 128 accumulation
+steps, reflecting the known 16 GB fit. It is SISO (155.7M parameters): upstream
+currently
 implements SISO in Triton and MIMO in TileLang, so retaining the portable
 model's MIMO rank would not exercise the requested kernel. Installation,
 compatibility, resume behavior and a reproducible benchmark protocol are in

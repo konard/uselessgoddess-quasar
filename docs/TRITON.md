@@ -65,10 +65,10 @@ cargo run --release -- prepare data/fineweb-edu --out data/shards
 python -m quasar_triton tiny --data data/shards --out runs/tiny-triton
 ```
 
-Default — bf16, activation checkpointing и эффективный batch
-`8 × 16 × 2048 = 262144` токена. Начать безопаснее с `--micro-batch 1`, увеличив
-`--accum` обратно пропорционально. `--no-checkpointing` быстрее, только если
-активации помещаются в 16 GB.
+Default для `tiny` учитывает замер владельца 16 GB карты: bf16, activation
+checkpointing и micro-batch 1. Accumulation 128 сохраняет эффективный batch
+`1 × 128 × 2048 = 262144` токена. `--no-checkpointing` быстрее, только если
+активации действительно помещаются; на известной конфигурации это не так.
 
 Флаг `--compile` экспериментален и по умолчанию выключен: он компилирует
 окружающие PyTorch-операции со статическими shapes. Сам SSD использует Triton и
@@ -79,6 +79,21 @@ Run автоматически продолжается из самого нов
 `model.json` и `run.json` не дают случайно продолжить checkpoint с изменённой
 архитектурой или schedule. Validation печатает NLL, perplexity и bits-per-byte;
 train telemetry — tok/s, effective TFLOP/s и ETA.
+
+### Цель: один проход 10BT за 24 часа
+
+Harness печатает `corpus_tokens`, число `corpus_equivalent_steps`,
+`24h_target_tok/s` и соответствующий theoretical `24h_target_tflop/s` из
+фактического `train/meta.json`. Для ровно 10B токенов при default batch это
+38 147 steps и не меньше 115 741 tok/s. Оценка `tiny` даёт примерно 116
+effective TFLOP/s только на model forward/backward, ещё до optimizer и I/O.
+Это выше приведённого в design пика RX 9070 XT (~97 bf16 TFLOP/s), поэтому
+24-часовой полный pass нельзя обещать даже идеальному kernel. Default 12 500
+steps остаётся compute-efficient целью 3.2768B токенов; полный pass запускается
+осознанно с `--steps`, напечатанным при старте. Реальный предел определит
+steady-state замер Triton на карте. Batcher выбирает окна детерминированно, но
+случайно, поэтому это объём одного корпуса, а не последовательное посещение
+каждого токена ровно один раз.
 
 ## Протокол измерения
 
