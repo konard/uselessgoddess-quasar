@@ -43,7 +43,7 @@ impl Dashboard {
                 renderer.register_metric(definition);
             }
             renderer.start(1, Some(total_steps));
-            renderer.start_split("train", total_steps);
+            renderer.start_split("optimizer steps", total_steps);
             renderer.update_split(completed_steps);
         }
         dashboard
@@ -71,7 +71,17 @@ impl Dashboard {
         self.interrupter.should_stop()
     }
 
-    pub(super) fn train(&mut self, step: usize, loss: f64, lr: f64, throughput: f64, tokens: u64) {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn train(
+        &mut self,
+        step: usize,
+        loss: f64,
+        lr: f64,
+        throughput: f64,
+        tokens: u64,
+        eta_hours: f64,
+        tflops: f64,
+    ) {
         let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
@@ -80,6 +90,8 @@ impl Dashboard {
         renderer.update_train(self.metrics.lr.state(lr));
         renderer.update_train(self.metrics.throughput.state(throughput));
         renderer.update_train(self.metrics.tokens.state(tokens as f64));
+        renderer.update_train(self.metrics.eta.state(eta_hours));
+        renderer.update_train(self.metrics.compute.state(tflops));
     }
 
     pub(super) fn valid(&mut self, report: eval::Report) {
@@ -107,6 +119,8 @@ struct Metrics {
     lr: Scalar,
     throughput: Scalar,
     tokens: Scalar,
+    eta: Scalar,
+    compute: Scalar,
 }
 
 impl Metrics {
@@ -118,6 +132,8 @@ impl Metrics {
             lr: Scalar::new("Learning rate", None, false, 3),
             throughput: Scalar::new("Throughput", Some("tok/s"), true, 0),
             tokens: Scalar::new("Tokens", None, true, 0),
+            eta: Scalar::new("ETA", Some("h"), false, 1),
+            compute: Scalar::new("Effective compute", Some("TFLOP/s"), true, 2),
         }
     }
 
@@ -129,6 +145,8 @@ impl Metrics {
             &self.lr,
             &self.throughput,
             &self.tokens,
+            &self.eta,
+            &self.compute,
         ]
         .into_iter()
         .map(Scalar::definition)
@@ -268,7 +286,7 @@ mod tests {
         let renderer = Box::new(Recorder(seen.clone()));
         let mut dashboard = Dashboard::with_renderer(renderer, 100, 40);
 
-        dashboard.train(41, 2.5, 3e-3, 12_345.0, 65_536);
+        dashboard.train(41, 2.5, 3e-3, 12_345.0, 65_536, 12.0, 13.5);
         dashboard.valid(eval::Report {
             nll: 2.0,
             perplexity: 2.0_f64.exp(),
@@ -285,7 +303,16 @@ mod tests {
                     _ => None,
                 })
                 .collect::<Vec<_>>(),
-            ["Loss", "Perplexity", "Bits per byte", "Learning rate", "Throughput", "Tokens"]
+            [
+                "Loss",
+                "Perplexity",
+                "Bits per byte",
+                "Learning rate",
+                "Throughput",
+                "Tokens",
+                "ETA",
+                "Effective compute",
+            ]
         );
         assert!(seen.contains(&Seen::Progress(40)), "resume position is rendered");
         assert!(seen.contains(&Seen::Progress(41)), "new step is rendered");
