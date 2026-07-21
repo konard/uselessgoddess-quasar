@@ -52,7 +52,7 @@ pub fn rms_norm_kernel<F: Float>(
 
     let base = row * dim;
 
-    let mut sum_sq = F::new(0.0);
+    let mut sum_sq = F::new(0.0_f32);
     for i in 0..dim {
         let v = x[base + i];
         sum_sq += v * v;
