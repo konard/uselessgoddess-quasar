@@ -23,10 +23,11 @@ use crate::{config, eval};
 
 /// Everything about a run that is not the model itself.
 ///
-/// The defaults are the `tiny` recipe: 24 hours on one RX 9070 XT.
+/// The defaults are the compute-efficient `tiny` recipe: about 20 training
+/// tokens per parameter. Wall-clock time depends on measured device throughput.
 #[derive(Config, Debug)]
 pub struct Run {
-    #[config(default = 60_000)]
+    #[config(default = 12_500)]
     pub steps: usize,
     /// Sequences per forward pass. This is the VRAM knob — raise it until the
     /// card refuses, then compensate with `accum`.
@@ -42,9 +43,9 @@ pub struct Run {
     /// Final rate as a fraction of `lr`.
     #[config(default = 0.1)]
     pub lr_floor: f64,
-    #[config(default = 2_000)]
+    #[config(default = 400)]
     pub warmup: usize,
-    #[config(default = 12_000)]
+    #[config(default = 2_500)]
     pub decay: usize,
     #[config(default = 0.1)]
     pub weight_decay: f32,
@@ -127,7 +128,14 @@ pub fn run(
 
     let schedule = Wsd::new(run.lr, run.lr_floor, run.warmup, run.decay, run.steps);
     let per_step = (run.micro_batch * run.accum * cfg.seq_len) as u64;
+    let total_tokens = run.steps as u64 * per_step;
     let mut window = Window::new();
+    println!(
+        "training plan: {} optimizer steps | {:.2}B tokens | {} tokens/step",
+        run.steps,
+        total_tokens as f64 / 1e9,
+        per_step
+    );
     let mut dashboard = Dashboard::new(run.steps, state.step);
 
     #[cfg(feature = "gpu")]
@@ -142,12 +150,20 @@ pub fn run(
         // Reading a loss scalar blocks until the device catches up, so it is
         // read on logging steps only; the rest never leave the queue.
         let logging = due(step, run.log_every);
+        let mut logged_loss = None;
 
         for micro in 0..run.accum {
             let batch = train.train((step * run.accum + micro) as u64, &device);
             let loss = model.loss(batch.input, batch.target);
             if logging {
-                window.loss += loss.nll.clone().into_scalar::<f32>() as f64 / run.accum as f64;
+                // Keep the reduction on the device. Reading every micro-batch
+                // separately serialises the GPU queue `accum` times (96 times
+                // in the report that prompted issue #7).
+                let nll = loss.nll.clone().detach();
+                logged_loss = Some(match logged_loss.take() {
+                    Some(total) => total + nll,
+                    None => nll,
+                });
             }
             // Scaling here rather than after accumulating keeps the gradient of
             // an accumulated step identical to that of one big batch.
@@ -159,8 +175,20 @@ pub fn run(
         window.steps += 1;
 
         if logging {
-            let report = window.report(state, run, lr, per_step);
-            dashboard.train(state.step, report.loss, report.lr, report.throughput, report.tokens);
+            window.loss = logged_loss
+                .expect("a logging step contains at least one micro-batch")
+                .div_scalar(run.accum as f64)
+                .into_scalar::<f32>() as f64;
+            let report = window.report(state, run, lr, per_step, cfg.flops_per_token());
+            dashboard.train(
+                state.step,
+                report.loss,
+                report.lr,
+                report.throughput,
+                report.tokens,
+                report.eta_hours,
+                report.tflops,
+            );
             if !dashboard.active() {
                 println!("{report}");
             }
@@ -212,9 +240,18 @@ impl Window {
         Self { loss: 0.0, steps: 0, started: Instant::now() }
     }
 
-    fn report(&self, state: State, run: &Run, lr: f64, per_step: u64) -> TrainingReport {
+    fn report(
+        &self,
+        state: State,
+        run: &Run,
+        lr: f64,
+        per_step: u64,
+        forward_flops_per_token: f64,
+    ) -> TrainingReport {
         let seconds = self.started.elapsed().as_secs_f64();
         let throughput = (self.steps as u64 * per_step) as f64 / seconds;
+        let (eta_hours, tflops) =
+            speed(state.step, run.steps, per_step, throughput, forward_flops_per_token);
         TrainingReport {
             step: state.step,
             steps: run.steps,
@@ -222,8 +259,25 @@ impl Window {
             lr,
             throughput,
             tokens: state.tokens,
+            eta_hours,
+            tflops,
         }
     }
+}
+
+/// Convert the measured token rate into the two quantities needed to decide
+/// whether a recipe is practical. Backward is conventionally 2× forward.
+fn speed(
+    step: usize,
+    steps: usize,
+    tokens_per_step: u64,
+    throughput: f64,
+    forward_flops_per_token: f64,
+) -> (f64, f64) {
+    let remaining_tokens = steps.saturating_sub(step) as f64 * tokens_per_step as f64;
+    let eta_hours = remaining_tokens / throughput / 3_600.0;
+    let tflops = throughput * 3.0 * forward_flops_per_token / 1e12;
+    (eta_hours, tflops)
 }
 
 struct TrainingReport {
@@ -233,19 +287,28 @@ struct TrainingReport {
     lr: f64,
     throughput: f64,
     tokens: u64,
+    eta_hours: f64,
+    tflops: f64,
 }
 
 impl std::fmt::Display for TrainingReport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "step {}/{} | loss {loss:.4} | lr {lr:.2e} | {:.0} tok/s | {:.2}B tokens",
+            "optimizer step {}/{} | loss {loss:.4} | lr {lr:.2e} | {:.0} tok/s | \
+             {:.2} TFLOP/s | {:.2}B tokens | ETA {eta}",
             self.step,
             self.steps,
             self.throughput,
+            self.tflops,
             self.tokens as f64 / 1e9,
             loss = self.loss,
             lr = self.lr,
+            eta = if self.eta_hours < 24.0 {
+                format!("{:.1}h", self.eta_hours)
+            } else {
+                format!("{:.1}d", self.eta_hours / 24.0)
+            },
         )
     }
 }
@@ -289,10 +352,37 @@ mod tests {
             .with_accum(2)
             .with_warmup(1)
             .with_decay(1)
-            .with_log_every(0)
+            // Exercise the device-side loss aggregation and scalar read.
+            .with_log_every(1)
             .with_eval_every(0)
             .with_save_every(0)
             .with_eval_batches(1)
+    }
+
+    #[test]
+    fn default_tiny_recipe_uses_a_compute_efficient_token_budget() {
+        let run = Run::new();
+        let tokens = run.steps as u64
+            * run.micro_batch as u64
+            * run.accum as u64
+            * config::Model::tiny().seq_len as u64;
+
+        // A 162.5M-parameter model needs roughly 20 tokens per parameter, not
+        // the 96.8 tokens per parameter scheduled by the old 60k-step recipe.
+        assert!((3_000_000_000..=3_500_000_000).contains(&tokens), "{tokens} tokens");
+    }
+
+    #[test]
+    fn reported_rate_explains_slow_optimizer_step_progress() {
+        let tokens_per_step = 96 * 2_048;
+        let throughput = 1_700.0;
+        let steps_per_hour = throughput * 3_600.0 / tokens_per_step as f64;
+        let (eta_hours, tflops) =
+            speed(40, 60_000, tokens_per_step, throughput, config::Model::tiny().flops_per_token());
+
+        assert!((steps_per_hour - 31.1).abs() < 0.1);
+        assert!((eta_hours / 24.0 - 80.3).abs() < 0.1);
+        assert!((tflops - 1.84).abs() < 0.01);
     }
 
     #[test]

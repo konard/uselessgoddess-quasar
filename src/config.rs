@@ -91,11 +91,11 @@ pub struct Model {
 }
 
 impl Model {
-    /// `quasar-tiny`, 164M — the model that fits a day of training.
+    /// `quasar-tiny`, 164M — the model intended for the first full run.
     ///
     /// Deep and thin (24 × 640) because MobileLLM measured depth beating width
-    /// below 1B, and a 24h budget on this card is 2–4B tokens: parameters spent
-    /// on width would go undertrained.
+    /// below 1B. Its compute-efficient target is about 3.25B tokens; the actual
+    /// wall-clock budget is derived from measured backend throughput.
     pub fn tiny() -> Self {
         Self::new(32_768, 640, 24)
             .with_seq_len(2048)

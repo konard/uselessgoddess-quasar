@@ -37,11 +37,19 @@ at any point continues where it stopped. Overrides worth knowing:
 `--steps`, `--micro-batch`, `--accum`, `--lr`, `--warmup`, `--decay`,
 `--save-every`, `--eval-every`.
 
+The default tiny recipe is 12,500 optimizer steps, or 3.2768B tokens with the
+default `8 × 16 × 2048` effective batch. Changing either batch knob also changes
+the total token budget unless `--steps` is adjusted. The startup summary prints
+both quantities before training begins. A progress item in the dashboard is one
+optimizer step, not one sequence or token.
+
 When training is attached to a terminal it opens Burn's official TUI, with
 live plots for training/validation loss, perplexity, bits-per-byte, learning
-rate, throughput and tokens processed. Press `q`, then `s`, to stop cleanly;
-the loop writes a resumable checkpoint before exiting. Redirected output and CI
-keep the line-oriented logs instead.
+rate, throughput, tokens processed, ETA, and effective TFLOP/s. Press `q`, then
+`s`, to stop cleanly; the loop writes a resumable checkpoint before exiting.
+Redirected output and CI keep the line-oriented logs instead. See
+[`docs/TRAINING_SPEED.md`](docs/TRAINING_SPEED.md) for interpreting these
+numbers and the investigation behind the defaults.
 
 Two knobs decide whether a preset fits the card, and both are on by default:
 `--muon false` puts the hidden matrices back on AdamW (16 B/param of state
