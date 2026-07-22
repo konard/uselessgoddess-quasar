@@ -1,0 +1,4 @@
+# Restore CubeCL's former default when reproducing the stream-count A/B.
+# Production uses the repository-root cubecl.toml with one retained stream.
+[streaming]
+max_streams = 128

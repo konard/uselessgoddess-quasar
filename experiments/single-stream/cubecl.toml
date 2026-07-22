@@ -1,5 +1,0 @@
-# burn-mamba uses the same setting in its examples to keep Fusion streams from
-# retaining VRAM (https://github.com/tracel-ai/burn/issues/4971).  Benchmarks
-# launched from this directory isolate that setting from quasar's defaults.
-[streaming]
-max_streams = 1

@@ -1,0 +1,5 @@
+# CubeCL otherwise keeps up to 128 Fusion streams alive. burn-mamba applies the
+# same cap in its own examples to avoid retaining stale GPU allocations:
+# https://github.com/tracel-ai/burn/issues/4971
+[streaming]
+max_streams = 1

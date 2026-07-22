@@ -20,19 +20,19 @@ use quasar::train::{Optim, Run};
 struct Args {
     #[arg(long, value_enum, default_value_t = BenchModel::TinyTurbo)]
     model: BenchModel,
-    #[arg(long, default_value_t = 6)]
+    #[arg(long, default_value_t = 4)]
     micro_batch: usize,
-    #[arg(long, default_value_t = 8)]
+    #[arg(long, default_value_t = 32)]
     accum: usize,
     #[arg(long, default_value_t = 1)]
     warmup: usize,
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, default_value_t = 3)]
     steps: usize,
     #[arg(long, value_enum, default_value_t = Dtype::F32)]
     dtype: Dtype,
-    #[arg(long, value_enum, default_value_t = Ssd::Recalculated)]
+    #[arg(long, value_enum, default_value_t = Ssd::Serial)]
     ssd: Ssd,
-    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
     checkpointing: bool,
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     muon: bool,
@@ -55,19 +55,18 @@ enum Dtype {
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum BenchModel {
     TinyTurbo,
-    WideTurbo,
+    LegacyTurbo,
 }
 
 impl BenchModel {
     fn config(self) -> Model {
         let mut cfg = Model::tiny_turbo();
-        if matches!(self, Self::WideTurbo) {
-            // Keep the parameter and FLOP budgets of 512 x 20, but issue fewer
-            // sequential layers and give each GEMM enough width to occupy the
-            // GPU. Ten attention heads preserve a 64-wide attention head.
-            cfg.d_model = 640;
-            cfg.n_layers = 12;
-            cfg.attn_heads = 10;
+        if matches!(self, Self::LegacyTurbo) {
+            // The pre-optimization shape remains available so the paired A/B
+            // can be reproduced after the wide candidate became the preset.
+            cfg.d_model = 512;
+            cfg.n_layers = 20;
+            cfg.attn_heads = 8;
         }
         cfg.validate().expect("benchmark model must be valid");
         cfg
@@ -166,9 +165,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn wide_candidate_trades_depth_for_width_without_changing_work() {
-        let narrow = BenchModel::TinyTurbo.config();
-        let wide = BenchModel::WideTurbo.config();
+    fn production_shape_trades_depth_for_width_without_changing_work() {
+        let narrow = BenchModel::LegacyTurbo.config();
+        let wide = BenchModel::TinyTurbo.config();
 
         let param_ratio = wide.budget().total as f64 / narrow.budget().total as f64;
         let flop_ratio = wide.flops_per_token() / narrow.flops_per_token();
