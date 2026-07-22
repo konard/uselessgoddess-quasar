@@ -16,11 +16,19 @@ use burn_mamba::mamba3::prelude::{Mamba3Config, Mamba3SsdPath};
 /// Both variants have the same forward and gradients. `Recalculated` retains
 /// only the inputs of the SSD and rebuilds its intermediates in the backward;
 /// `Serial` lets autodiff retain them. The latter can be faster when it fits.
-#[derive(Config, Debug, Default, PartialEq, Eq)]
+#[derive(Config, Debug, PartialEq, Eq)]
 pub enum SsdMode {
     Serial,
-    #[default]
     Recalculated,
+}
+
+// `Config` is a derive macro too, and its enum expansion does not preserve the
+// standard `#[default]` helper attribute on every feature combination.
+#[allow(clippy::derivable_impls)]
+impl Default for SsdMode {
+    fn default() -> Self {
+        Self::Recalculated
+    }
 }
 
 /// What mixes tokens in a layer.
