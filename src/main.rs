@@ -130,6 +130,15 @@ struct Overrides {
     /// Recompute activations in the backward.
     #[arg(long)]
     checkpointing: Option<bool>,
+    /// SSD backward: retain intermediates for speed or recalculate for memory.
+    #[arg(long, value_enum)]
+    ssd: Option<Ssd>,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Ssd {
+    Serial,
+    Recalculated,
 }
 
 /// The model-shape knobs worth sweeping without editing a preset, because they
@@ -339,6 +348,12 @@ impl Overrides {
             muon,
             checkpointing
         );
+        if let Some(ssd) = self.ssd {
+            run.ssd_mode = Some(match ssd {
+                Ssd::Serial => config::SsdMode::Serial,
+                Ssd::Recalculated => config::SsdMode::Recalculated,
+            });
+        }
         run
     }
 }

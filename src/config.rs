@@ -11,6 +11,23 @@
 use burn::prelude::*;
 use burn_mamba::mamba3::prelude::{Mamba3Config, Mamba3SsdPath};
 
+/// How burn-mamba evaluates the chunked SSD recurrence during training.
+///
+/// Both variants have the same forward and gradients. `Recalculated` retains
+/// only the inputs of the SSD and rebuilds its intermediates in the backward;
+/// `Serial` lets autodiff retain them. The latter can be faster when it fits.
+#[derive(Config, Debug, PartialEq, Eq)]
+pub enum SsdMode {
+    Serial,
+    Recalculated,
+}
+
+impl Default for SsdMode {
+    fn default() -> Self {
+        Self::Recalculated
+    }
+}
+
 /// What mixes tokens in a layer.
 ///
 /// A pure-SSM stack recalls an arbitrary earlier token poorly — its memory is a

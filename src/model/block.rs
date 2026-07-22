@@ -4,7 +4,7 @@ use burn::nn::{RmsNorm, RmsNormConfig};
 use burn::prelude::*;
 use burn_mamba::mamba3::prelude::{Mamba3, Mamba3SsdPath};
 
-use crate::config::{self, Mixer};
+use crate::config::{self, Mixer, SsdMode};
 use crate::model::{Attention, Ffn};
 
 /// Whatever mixes tokens in this layer.
@@ -27,10 +27,14 @@ pub struct Block {
     /// Chunk length of the SSD scan, resolved once at build time so the forward
     /// never falls back to burn-mamba's `None` (which pads the sequence).
     ssd_chunk: usize,
+    /// Whether SSD intermediates are retained or recomputed in the backward.
+    /// It changes execution only, not parameters or checkpoint records.
+    #[module(skip)]
+    ssd_mode: SsdMode,
 }
 
 impl Block {
-    pub fn new(cfg: &config::Model, layer: usize, device: &Device) -> Self {
+    pub fn new(cfg: &config::Model, layer: usize, ssd_mode: SsdMode, device: &Device) -> Self {
         let mix = match cfg.mixer(layer) {
             Mixer::Ssm => Mix::Ssm(cfg.mamba().init(device)),
             Mixer::Attention => Mix::Attn(Attention::new(cfg, device)),
@@ -41,6 +45,7 @@ impl Block {
             norm_ffn: RmsNormConfig::new(cfg.d_model).init(device),
             ffn: Ffn::new(cfg, device),
             ssd_chunk: cfg.ssd_chunk_len(),
+            ssd_mode,
         }
     }
 
@@ -53,7 +58,12 @@ impl Block {
             // the shipped presets does not divide `seq_len` and makes every SSM
             // layer pad its sequence with six `cat` allocations.
             Mix::Ssm(ssm) => {
-                let path = Mamba3SsdPath::SerialRecalculated(Some(self.ssd_chunk));
+                let path = match self.ssd_mode {
+                    SsdMode::Serial => Mamba3SsdPath::Serial(Some(self.ssd_chunk)),
+                    SsdMode::Recalculated => {
+                        Mamba3SsdPath::SerialRecalculated(Some(self.ssd_chunk))
+                    }
+                };
                 ssm.forward(self.norm_mix.forward(x.clone()), None, path).0
             }
             Mix::Attn(attn) => attn.forward(self.norm_mix.forward(x.clone())),

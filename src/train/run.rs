@@ -61,6 +61,11 @@ pub struct Run {
     /// whether `base` fits at all.
     #[config(default = true)]
     pub checkpointing: bool,
+    /// SSD-specific memory/speed tradeoff. `None` keeps burn-mamba's
+    /// memory-efficient recalculated backward. This is optional so run files
+    /// written before the knob existed remain readable.
+    #[config(default = "None")]
+    pub ssd_mode: Option<config::SsdMode>,
     #[config(default = 1337)]
     pub seed: u64,
     #[config(default = 20)]
@@ -112,7 +117,7 @@ pub fn run(
         return Err(Error::Vocab { config: cfg.vocab_size, shards });
     }
 
-    let mut model = Quasar::new(cfg, &device);
+    let mut model = Quasar::new_with_ssd(cfg, run.ssd_mode.clone().unwrap_or_default(), &device);
     let mut optim = Optim::new(run, &model);
 
     std::fs::create_dir_all(out).map_err(Error::Io)?;
@@ -370,6 +375,17 @@ mod tests {
         // A 162.5M-parameter model needs roughly 20 tokens per parameter, not
         // the 96.8 tokens per parameter scheduled by the old 60k-step recipe.
         assert!((3_000_000_000..=3_500_000_000).contains(&tokens), "{tokens} tokens");
+    }
+
+    #[test]
+    fn old_run_files_without_an_ssd_mode_still_load() {
+        let run = Run::new();
+        let mut json = serde_json::to_value(&run).unwrap();
+        json.as_object_mut().unwrap().remove("ssd_mode");
+
+        let loaded: Run = serde_json::from_value(json).unwrap();
+
+        assert_eq!(loaded.ssd_mode, None);
     }
 
     #[test]

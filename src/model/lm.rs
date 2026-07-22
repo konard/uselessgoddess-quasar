@@ -21,12 +21,22 @@ pub struct Quasar {
 
 impl Quasar {
     pub fn new(cfg: &config::Model, device: &Device) -> Self {
+        Self::new_with_ssd(cfg, config::SsdMode::default(), device)
+    }
+
+    /// Build the same model with an explicit SSD memory/speed tradeoff.
+    ///
+    /// `ssd_mode` changes only which mathematically equivalent burn-mamba
+    /// backward implementation runs; it does not change parameters or records.
+    pub fn new_with_ssd(cfg: &config::Model, ssd_mode: config::SsdMode, device: &Device) -> Self {
         cfg.validate().expect("model config is invalid");
         Self {
             embed: EmbeddingConfig::new(cfg.vocab_size, cfg.d_model)
                 .with_initializer(init::normal())
                 .init(device),
-            blocks: (0..cfg.n_layers).map(|i| Block::new(cfg, i, device)).collect(),
+            blocks: (0..cfg.n_layers)
+                .map(|i| Block::new(cfg, i, ssd_mode.clone(), device))
+                .collect(),
             norm: RmsNormConfig::new(cfg.d_model).init(device),
             head: (!cfg.tied_embeddings).then(|| {
                 LinearConfig::new(cfg.d_model, cfg.vocab_size)
