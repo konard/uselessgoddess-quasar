@@ -49,6 +49,14 @@ jobs:
           cargo run --release --no-default-features --features vulkan
           --example train_bench -- --micro-batch 6 --accum 8 --warmup 1
           --steps 1 --dtype f32 --ssd serial --checkpointing true --muon true
+      # Same 49,152-token optimizer step, but retain the outer autodiff graph
+      # and trade batch width for accumulation.  This directly tests the
+      # maintainer's micro-batch=4 hypothesis without changing the token budget.
+      - name: Vulkan tiny-turbo — no checkpoint, micro-batch 4
+        run: >-
+          cargo run --release --no-default-features --features vulkan
+          --example train_bench -- --micro-batch 4 --accum 12 --warmup 1
+          --steps 1 --dtype f32 --ssd serial --checkpointing false --muon true
 
   smoke:
     runs-on: ubuntu-latest
