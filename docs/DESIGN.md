@@ -165,9 +165,14 @@ fp32, 16 B/param, и **`base` в 16 GB с AdamW не помещается** — 
 2. **Activation checkpointing** — `Device::gradient_checkpointing()`
    (`DispatchDevice::autodiff_checkpointed`, стратегия `Balanced`). Режет
    активации, а не состояния оптимизатора, то есть вторую половину задачи, ценой
-   примерно трети лишних FLOPs на backward. Для SSD-путей это дополнение, а не
-   дубль: `Mamba3SsdPath::SerialRecalculated` уже пересчитывает внутренности
-   рекуррентности, но не активации FFN и attention.
+   примерно трети лишних FLOPs на backward. Он также покрывает FFN и attention,
+   которых SSD-backward не видит. Но на `tiny-turbo` измерение issue #13
+   показало, что сочетать его с внутренним recompute
+   `Mamba3SsdPath::SerialRecalculated` уже невыгодно: `--ssd serial` помещается
+   при `micro_batch=6` и даёт +24–30% tok/s. Поэтому `tiny-turbo` выбирает его
+   по умолчанию. Для остальных пресетов и увеличенных форм recalculated
+   остаётся fallback по памяти; детали и отрицательные эксперименты — в
+   `KERNELS.md`.
 
 Ещё две вещи из того же списка не потребовали кода, потому что уже были:
 **packing** — батчи режутся окнами из сплошного потока токенов

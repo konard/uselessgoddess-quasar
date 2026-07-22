@@ -39,7 +39,7 @@ cargo run --release -- generate runs/tiny --prompt "The reason"
 `train` resumes from the newest checkpoint under `--out`, so a run interrupted
 at any point continues where it stopped. Overrides worth knowing:
 `--steps`, `--micro-batch`, `--accum`, `--lr`, `--warmup`, `--decay`,
-`--save-every`, `--eval-every`.
+`--save-every`, `--eval-every`, `--ssd`.
 
 The default tiny recipe is 12,500 optimizer steps, or 3.2768B tokens with the
 default `8 × 16 × 2048` effective batch. Changing either batch knob also changes
@@ -55,11 +55,17 @@ Redirected output and CI keep the line-oriented logs instead. See
 [`docs/TRAINING_SPEED.md`](docs/TRAINING_SPEED.md) for interpreting these
 numbers and the investigation behind the defaults.
 
-Two knobs decide whether a preset fits the card, and both are on by default:
+Three knobs decide the memory/speed tradeoff. Muon and checkpointing are on by
+default:
 `--muon false` puts the hidden matrices back on AdamW (16 B/param of state
 instead of 12, which is what stopped `base` fitting 16 GB), and
 `--checkpointing false` stops recomputing activations in the backward, trading
-memory back for about a third of the step time. See `docs/DESIGN.md` §3.
+memory back for about a third of the step time. `tiny-turbo` also defaults to
+the measured `--ssd serial`, which retains burn-mamba's chunk intermediates and
+was 24–30% faster on a 16-GB RX 9070 XT than the memory-saving
+`--ssd recalculated`; select the latter explicitly if a larger override runs
+out of memory. Other presets retain the memory-saving default. See
+`docs/DESIGN.md` §3 and [`docs/KERNELS.md`](docs/KERNELS.md).
 
 Validation reports negative log-likelihood, perplexity and **bits-per-byte** —
 the last is the only figure comparable across tokenizers, and the one the design

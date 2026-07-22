@@ -47,6 +47,23 @@ Burn TUI считал optimizer steps. При `micro_batch=1`, `accum=96` и
    optimizer moment и тем самым повышает расход VRAM; заранее объявлять его
    ускорением без измерения нельзя.
 
+## Повторное измерение на RX 9070 XT
+
+В issue #13 появился доступ к self-hosted RX 9070 XT и точной форме ночного
+запуска `tiny-turbo` (`micro_batch=6`, `accum=8`, Muon, fp32). Короткий
+детерминированный full-step A/B показал ещё один конкретный источник времени:
+внешний checkpointing блока сочетался с собственным recompute-backward
+`SerialRecalculated` внутри SSD.
+
+При неизменном внешнем checkpointing переход на математически эквивалентный
+`--ssd serial` поднял throughput с 3616 до 4485 tok/s (+24%) на ROCm и с 4834
+до 6274 tok/s (+29,8%) на Vulkan, сохранив loss внутри каждого A/B. Полный
+forward/backward/optimizer step уложился в 16 GB, поэтому этот режим стал
+default именно для `tiny-turbo`. Отключение внешнего checkpointing, напротив,
+закончилось OOM, а простой выбор bf16/f16 — ошибкой LLVM для RDNA4 WMMA; эти
+варианты не включены. Методика, runs и точные ограничения описаны в
+[`KERNELS.md`](KERNELS.md).
+
 ## Что изменилось в наблюдаемости
 
 Перед первым шагом harness теперь печатает число optimizer steps, полный token
