@@ -7,6 +7,9 @@ description = "A Mamba-3 language model family and training harness for a single
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/uselessgoddess/quasar"
 
+[workspace]
+exclude = ["vendor/burn-mamba"]
+
 [dependencies]
 # burn's `main` (0.22-pre) rather than 0.21, pinned to the revision burn-mamba
 # builds against: the dispatch rewrite dropped the `B: Backend` type parameter

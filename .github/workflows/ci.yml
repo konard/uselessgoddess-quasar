@@ -23,7 +23,9 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all --check
+      # burn-mamba is a subtree with its own formatting checks and upstream
+      # history; format the Quasar package without rewriting vendored sources.
+      - run: cargo fmt --package quasar --check
       - run: cargo clippy --all-targets
       # The default backend is CPU, so the whole suite -- real forward and
       # backward passes included -- runs on a hosted runner.

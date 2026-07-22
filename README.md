@@ -132,7 +132,7 @@ samples — the whole pipeline in under a minute on a CPU.
 ## Development
 
 ```sh
-cargo fmt --check
+cargo fmt --package quasar --check
 cargo clippy --all-targets -- -D warnings
 cargo test
 ```
