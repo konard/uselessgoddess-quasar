@@ -31,7 +31,7 @@ jobs:
       - run: cargo run --release -- budget tiny
       - run: cargo run --release -- budget tiny-turbo
 
-  # Synchronized issue-shape A/B plus the production optimizer step on the
+  # Synchronized stepwise kernel A/B plus the production optimizer step on the
   # maintainer's GPU. One complete step is discarded for fusion/autotune
   # warm-up; every measured three-step window stays below one minute.
   gpu-benchmark:
@@ -45,9 +45,9 @@ jobs:
         run: |
           rocminfo | grep -m1 -E 'Name:.*gfx'
           rocm-smi --showproductname --showmeminfo vram
-      # The script uses one compiled binary for the exact former K4 and its
-      # CubeCL replacement, then verifies the full production batch still fits.
-      - name: Vulkan state-passing A/B and production recipe
+      # One binary isolates the old tensor paths, K4 alone, then K4+K1 before
+      # verifying that the full production batch still fits.
+      - name: Vulkan stepwise kernel A/B and production recipe
         run: examples/state_passing_ab.sh
       - name: Preserve GPU benchmark logs
         if: always()

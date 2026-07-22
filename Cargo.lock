@@ -789,7 +789,7 @@ dependencies = [
 [[package]]
 name = "burn-mamba"
 version = "0.29.0"
-source = "git+https://github.com/konard/burn-mamba.git?rev=efea1fdb0289608c26d6d2d31da74a4a03412d4d#efea1fdb0289608c26d6d2d31da74a4a03412d4d"
+source = "git+https://github.com/konard/burn-mamba.git?rev=ea297b38b4102c7bc8aa41175c7cf3ec332bab8f#ea297b38b4102c7bc8aa41175c7cf3ec332bab8f"
 dependencies = [
  "burn",
  "burn-cubecl",

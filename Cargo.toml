@@ -24,9 +24,9 @@ burn = { git = "https://github.com/tracel-ai/burn.git", rev = "d028234e2ccd75c5c
 ] }
 # The Mamba-3 SSD kernels: trapezoidal discretisation, data-dependent RoPE and
 # MIMO, with a memory-efficient custom backward. The fork adds a tested CubeCL
-# state-passing kernel while its upstream PR is reviewed; keep the exact commit
+# state-passing and chunk-cumsum kernels while its upstream PR is reviewed; keep the exact commit
 # so benchmark and training builds cannot move independently.
-burn-mamba = { git = "https://github.com/konard/burn-mamba.git", rev = "efea1fdb0289608c26d6d2d31da74a4a03412d4d", default-features = false, features = [
+burn-mamba = { git = "https://github.com/konard/burn-mamba.git", rev = "ea297b38b4102c7bc8aa41175c7cf3ec332bab8f", default-features = false, features = [
     "mamba3",
     "autodiff",
 ] }

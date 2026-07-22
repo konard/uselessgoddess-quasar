@@ -130,7 +130,7 @@ Matmul занимает около 79% recorded GPU time, но один микр
 и размеры GEMM, и launch/orchestration overhead; оптимизация одного RMSNorm не
 может дать требуемый порядок величины.
 
-## 5. Первый CubeCL-шаг: K4 state passing
+## 5. Пошаговый CubeCL-порт: K4 state passing и K1 chunk cumsum
 
 После профиля fork burn-mamba добавил первую измеримую CubeCL-границу:
 [revision `efea1fdb`](https://github.com/konard/burn-mamba/commit/efea1fdb0289608c26d6d2d31da74a4a03412d4d)
@@ -188,8 +188,17 @@ backward разбит на отдельные `dz/do`, `dqkv`, rotary/bias/angle
 тоже не совпадают буквально: там основной случай `qk=128, v=64`, здесь
 `qk=64, v=64`.
 
-Поэтому K4 — первый шаг, а следующие seams добавляются только после
-отдельного A/B. Более широкий порт считается готовым только если есть:
+Второй seam — [revision `ea297b38`](https://github.com/konard/burn-mamba/commit/ea297b38b4102c7bc8aa41175c7cf3ec332bab8f) —
+заменяет K1, prefix sum decay внутри каждого chunk. Один work item обрабатывает
+один `[batch, head, chunk]` scan длины 64; forward одновременно меняет layout
+`BNLH → BHNL`, а точный VJP выполняет обратный suffix sum сразу в исходном
+layout. K1 не создаёт дополнительный scratch tensor. Reference доступен через
+`BURN_MAMBA_FUSED_CHUNK_CUMSUM=0`, поэтому постоянный GPU job теперь измеряет
+три последовательных режима одного binary: reference, только K4 и K4+K1.
+Результат K1 будет зафиксирован только после fresh RX 9070 XT run.
+
+Каждый следующий seam добавляется только после отдельного A/B. Более широкий
+порт считается готовым только если есть:
 
 1. forward parity fp32 на нескольких chunk/shape/MIMO вариантах;
 2. gradient parity для каждого входа и параметра, включая finite differences;
