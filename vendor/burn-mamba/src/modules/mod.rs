@@ -1,0 +1,188 @@
+use burn::config::Config;
+use burn::prelude::*;
+
+/// Custom activations (fp16-stable `silu` / `softplus` / `log_sigmoid`).
+pub mod activation;
+/// Bidirectional layer stacks (straight + reversed passes, merged per pair).
+pub mod bidi;
+/// The per-network cache collection trait ([`CacheStack`]) + [`MambaCaches`].
+pub mod cache;
+/// A single Pre-LN residual layer wrapping one SSM block ([`Layer`]).
+pub mod layer;
+/// The (virtual-)layer stack over real weight sets ([`Layers`]).
+pub mod layers;
+/// Loss functions (binary cross-entropy, cross-entropy, mean squared error).
+pub mod loss;
+/// Tensor helpers: `segsum`, `gqa`, typed `split`, and `sanity` guards.
+pub mod misc;
+/// Multi-Gate Residuals: multi-stream gated depth-wise residuals ([`Residuals`]).
+pub mod multi_gate;
+/// Family-generic networks ([`MambaLatentNet`] / [`MambaVocabNet`]).
+pub mod network;
+/// RMS norms ([`RmsNorm`] QK-norm + [`RmsNormGated`]), fp16-safe.
+pub mod norm;
+/// Pooled SSM-state moments ([`StateMoments`]) for state participation ratios.
+pub mod state_moments;
+
+pub use activation::log_sigmoid::log_sigmoid;
+pub use activation::silu::Silu;
+pub use activation::softplus::softplus;
+pub use misc::gqa::gqa_expand_to_heads;
+pub use misc::rope::{apply_rope, apply_rope_partial, wrap_angle};
+pub use misc::sanity::sanity;
+pub use misc::segsum::segsum;
+pub use misc::split::split_into;
+pub use norm::rms_norm::{RmsNorm, RmsNormConfig};
+pub use norm::rms_norm_gated::{RmsNormGated, RmsNormGatedConfig};
+
+pub use bidi::{MambaBidiLayers, MambaBidiLayersConfig};
+pub use cache::{CacheStack, MambaCaches};
+pub use layer::Layer;
+pub use layers::{Layers, LayersBuilder};
+pub use multi_gate::{
+    MultiGate, MultiGateResidual, MultiGateResidualConfig, Residuals, ResidualsConfig,
+};
+pub use network::{MambaLatentNet, MambaLatentNetConfig, MambaVocabNet, MambaVocabNetConfig};
+pub use state_moments::{StateMoments, StatePairing};
+
+/// Per-family block interface the generic [`Layer`]/[`Layers`] delegate to.
+pub trait MambaBlock: Module {
+    /// Per-block streaming cache (one layer's worth of state).
+    type Cache;
+    /// The per-network cache collection for this family.
+    type Caches: CacheStack<Cache = Self::Cache>;
+    /// SSD algorithm / chunk-length selector. `()` for families without one.
+    type SsdPath;
+
+    /// Full-sequence (chunked) pass — training / prefill.
+    fn block_forward(
+        &self,
+        x: Tensor<3>,
+        cache: Option<Self::Cache>,
+        ssd_path: Self::SsdPath,
+    ) -> (Tensor<3>, Self::Cache);
+
+    /// [`Self::block_forward`], additionally returning the exact pooled
+    /// moments of the block's per-token SSM states ([`StateMoments`] — the
+    /// inputs of a state participation ratio), matching what a
+    /// [`Self::block_step`] loop reading the cache would accumulate (for
+    /// Mamba-3, the **physical-frame** states). The default implementation
+    /// panics — Mamba-2 provides the closed form
+    /// ([`Mamba2::forward_with_state_moments`](crate::mamba2::prelude::Mamba2::forward_with_state_moments))
+    /// and Mamba-3 the serial chunkwise de-rotated one
+    /// (`Mamba3::forward_with_state_moments`).
+    fn block_forward_with_state_moments(
+        &self,
+        x: Tensor<3>,
+        cache: Option<Self::Cache>,
+        ssd_path: Self::SsdPath,
+    ) -> (Tensor<3>, Self::Cache, StateMoments) {
+        let _ = (x, cache, ssd_path);
+        unimplemented!(
+            "block_forward_with_state_moments: only implemented for Mamba-2 and Mamba-3"
+        )
+    }
+
+    /// [`Self::block_forward_with_state_moments`] with the moments left
+    /// **attached** to the autodiff graph, for a differentiable loss term
+    /// over them (e.g. a state-PR penalty). The default implementation
+    /// panics — Mamba-2 and Mamba-3 provide it (see
+    /// [`Mamba2::forward_with_state_moments_grad`](crate::mamba2::prelude::Mamba2::forward_with_state_moments_grad)).
+    fn block_forward_with_state_moments_grad(
+        &self,
+        x: Tensor<3>,
+        cache: Option<Self::Cache>,
+        ssd_path: Self::SsdPath,
+    ) -> (Tensor<3>, Self::Cache, StateMoments) {
+        let _ = (x, cache, ssd_path);
+        unimplemented!(
+            "block_forward_with_state_moments_grad: only implemented for Mamba-2 and Mamba-3"
+        )
+    }
+
+    /// Single-token recurrent step — decoding.
+    fn block_step(&self, x: Tensor<2>, cache: Option<Self::Cache>) -> (Tensor<2>, Self::Cache);
+
+    /// Closed-form **stationary fixed point**: the limit of
+    /// [`Self::block_step`] outputs when the same constant token is stepped
+    /// forever. The limit forgets the starting state, so no cache is taken or
+    /// returned. The default implementation panics — only Mamba-3 currently
+    /// provides the closed form (see
+    /// [`Mamba3::step_infinite`](crate::mamba3::prelude::Mamba3::step_infinite)).
+    fn block_step_infinite(&self, x: Tensor<2>) -> Tensor<2> {
+        let _ = x;
+        unimplemented!("block_step_infinite: constant-input shortcuts are only implemented for Mamba-3")
+    }
+
+    /// Closed-form jump equivalent to `n` consecutive [`Self::block_step`]
+    /// calls on the same constant token: the last step's output and the final
+    /// cache, in O(1). The default implementation panics — only Mamba-3
+    /// currently provides it (see
+    /// [`Mamba3::step_n_approx`](crate::mamba3::prelude::Mamba3::step_n_approx)).
+    fn block_step_n_approx(
+        &self,
+        x: Tensor<2>,
+        n: usize,
+        cache: Option<Self::Cache>,
+    ) -> (Tensor<2>, Self::Cache) {
+        let _ = (x, n, cache);
+        unimplemented!("block_step_n_approx: constant-input shortcuts are only implemented for Mamba-3")
+    }
+
+    /// Build `n_virtual` zero caches sized for a `[batch, sequence, d_model]` input.
+    fn zero_caches_3d(&self, x: &Tensor<3>, n_virtual: usize) -> Self::Caches;
+    /// Build `n_virtual` zero caches sized for a `[batch, d_model]` input.
+    fn zero_caches_2d(&self, x: &Tensor<2>, n_virtual: usize) -> Self::Caches;
+}
+
+/// A block *config* that knows its `d_model` and how to build its [`MambaBlock`].
+/// Lets the generic builders construct `Layers<M>` without knowing the family.
+pub trait MambaBlockConfig: Config {
+    /// The block this config builds.
+    type Block: MambaBlock;
+    /// Model width, used to size each layer's pre-norm.
+    fn d_model(&self) -> usize;
+    /// Allocate and initialise the block on `device`.
+    fn init_block(&self, device: &Device) -> Self::Block;
+}
+
+// ===========================================================================
+// Unifying enums: one runtime + one serializable Config across all families
+// ===========================================================================
+//
+// The generic `LatentNetwork<M>` above is family-typed (`M` is fixed at the type
+// level). To let an example (or a user) choose the family at *runtime* — and to
+// serialize that choice for docs/config round-trips — we wrap the three
+// monomorphisations in enums. `#[derive(Module)]` and `#[derive(Config)]` both
+// support enums (verified), so this stays first-class Burn.
+
+/// An explicit, family-tagged SSD-path selector for the unified API.
+///
+/// Each variant carries the concrete per-family path so callers can choose the
+/// algorithm/chunk explicitly; the `*_default` constructors offer the common
+/// "ride along the family default" path without making it the *only* option.
+#[derive(Debug, Clone)]
+pub enum MambaSsdPath {
+    /// Mamba-1 has no SSD chunking (path is the unit type).
+    #[cfg(feature = "mamba1")]
+    Mamba1,
+    /// Mamba-2 SSD path.
+    #[cfg(feature = "mamba2")]
+    Mamba2(crate::mamba2::prelude::Mamba2SsdPath),
+    /// Mamba-3 SSD path.
+    #[cfg(feature = "mamba3")]
+    Mamba3(crate::mamba3::prelude::Mamba3SsdPath),
+}
+
+impl MambaSsdPath {
+    /// The Mamba-2 default path (`SerialRecalculated`, optimal chunk).
+    #[cfg(feature = "mamba2")]
+    pub fn mamba2_default() -> Self {
+        Self::Mamba2(Default::default())
+    }
+    /// The Mamba-3 default path (`SerialRecalculated`, optimal chunk).
+    #[cfg(feature = "mamba3")]
+    pub fn mamba3_default() -> Self {
+        Self::Mamba3(Default::default())
+    }
+}
