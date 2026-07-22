@@ -1,0 +1,8 @@
+# Timestamp every CubeCL kernel and print an aggregate table at Device::sync.
+# This deliberately serialises launches, so it diagnoses the hot path rather
+# than measuring end-to-end throughput.
+[profiling]
+logger = { level = "basic", stdout = true }
+
+[streaming]
+max_streams = 1

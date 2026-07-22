@@ -44,33 +44,44 @@ jobs:
         run: |
           rocminfo | grep -m1 -E 'Name:.*gfx'
           rocm-smi --showproductname --showmeminfo vram
-      # The preceding matched-token A/B selected one stream, micro-batch 4 and
-      # no outer checkpointing. Use it as the paired baseline for a 640 x 12
-      # candidate with almost identical parameters and FLOPs to 512 x 20.
-      - name: Vulkan tiny-turbo 512x20
-        working-directory: experiments/single-stream
-        run: >-
-          cargo run --manifest-path ../../Cargo.toml --release
-          --no-default-features --features vulkan --example train_bench --
-          --micro-batch 4 --accum 12 --warmup 1 --steps 3 --dtype f32
-          --ssd serial --checkpointing false --muon true
-      - name: Vulkan wide-turbo 640x12 — micro-batch 4
+      # The shape A/B selected wide-turbo at batch 4. Repeat fp32 beside the
+      # reduced-precision probes so driver/load variation stays paired.
+      - name: Vulkan wide-turbo fp32
         working-directory: experiments/single-stream
         run: >-
           cargo run --manifest-path ../../Cargo.toml --release
           --no-default-features --features vulkan --example train_bench --
           --model wide-turbo --micro-batch 4 --accum 12 --warmup 1 --steps 3
           --dtype f32 --ssd serial --checkpointing false --muon true
-      # The analytic activation estimate is 21% smaller, so also test whether
-      # the wider model can use batch 6 without the severe thrashing seen above.
-      - name: Vulkan wide-turbo 640x12 — micro-batch 6
+      # Burn has no automatic mixed precision: these make parameters,
+      # activations and optimizer state low-precision. A finite short run is an
+      # upper-bound experiment, not sufficient evidence for a training default.
+      - name: Vulkan wide-turbo bf16 probe
+        continue-on-error: true
         working-directory: experiments/single-stream
         run: >-
           cargo run --manifest-path ../../Cargo.toml --release
           --no-default-features --features vulkan --example train_bench --
-          --model wide-turbo
-          --micro-batch 6 --accum 8 --warmup 1 --steps 3 --dtype f32
-          --ssd serial --checkpointing false --muon true
+          --model wide-turbo --micro-batch 4 --accum 12 --warmup 1 --steps 3
+          --dtype bf16 --ssd serial --checkpointing false --muon true
+      - name: Vulkan wide-turbo f16 probe
+        continue-on-error: true
+        working-directory: experiments/single-stream
+        run: >-
+          cargo run --manifest-path ../../Cargo.toml --release
+          --no-default-features --features vulkan --example train_bench --
+          --model wide-turbo --micro-batch 4 --accum 12 --warmup 1 --steps 3
+          --dtype f16 --ssd serial --checkpointing false --muon true
+      # Profiling inserts a timestamp around every launch and therefore uses
+      # one micro-batch only. Its synchronized summary identifies kernel classes
+      # and launch counts; it is intentionally not a throughput measurement.
+      - name: CubeCL kernel profile — wide-turbo fp32
+        working-directory: experiments/profile
+        run: >-
+          cargo run --manifest-path ../../Cargo.toml --release
+          --no-default-features --features vulkan --example train_bench --
+          --model wide-turbo --micro-batch 1 --accum 1 --warmup 1 --steps 1
+          --dtype f32 --ssd serial --checkpointing false --muon true
 
   smoke:
     runs-on: ubuntu-latest
