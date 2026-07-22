@@ -31,8 +31,8 @@ jobs:
       - run: cargo run --release -- budget tiny
 
   # A synchronized production-shape optimizer step on the maintainer's GPU.
-  # One complete step is discarded for fusion/autotune warm-up; the measured
-  # step itself is well below the issue's one-minute experiment budget.
+  # One complete step is discarded for fusion/autotune warm-up; each measured
+  # three-step window is well below the issue's one-minute experiment budget.
   gpu-benchmark:
     runs-on: self-hosted
     timeout-minutes: 15
@@ -48,7 +48,7 @@ jobs:
         run: >-
           cargo run --release --no-default-features --features vulkan
           --example train_bench -- --micro-batch 6 --accum 8 --warmup 1
-          --steps 1 --dtype f32 --ssd serial --checkpointing true --muon true
+          --steps 3 --dtype f32 --ssd serial --checkpointing true --muon true
       # Same 49,152-token optimizer step, but retain the outer autodiff graph
       # and trade batch width for accumulation.  This directly tests the
       # maintainer's micro-batch=4 hypothesis without changing the token budget.
@@ -56,7 +56,25 @@ jobs:
         run: >-
           cargo run --release --no-default-features --features vulkan
           --example train_bench -- --micro-batch 4 --accum 12 --warmup 1
-          --steps 1 --dtype f32 --ssd serial --checkpointing false --muon true
+          --steps 3 --dtype f32 --ssd serial --checkpointing false --muon true
+      # burn-mamba caps CubeCL at one stream in its own examples to stop stale
+      # Fusion streams retaining VRAM.  Repeat micro-batch 4 to isolate the
+      # stream setting, then see whether the saved memory makes batch 6 fit
+      # without the outer checkpoint/recompute pass.
+      - name: Vulkan tiny-turbo — one stream, no checkpoint, micro-batch 4
+        working-directory: experiments/single-stream
+        run: >-
+          cargo run --manifest-path ../../Cargo.toml --release
+          --no-default-features --features vulkan --example train_bench --
+          --micro-batch 4 --accum 12 --warmup 1 --steps 3 --dtype f32
+          --ssd serial --checkpointing false --muon true
+      - name: Vulkan tiny-turbo — one stream, no checkpoint, micro-batch 6
+        working-directory: experiments/single-stream
+        run: >-
+          cargo run --manifest-path ../../Cargo.toml --release
+          --no-default-features --features vulkan --example train_bench --
+          --micro-batch 6 --accum 8 --warmup 1 --steps 3 --dtype f32
+          --ssd serial --checkpointing false --muon true
 
   smoke:
     runs-on: ubuntu-latest
