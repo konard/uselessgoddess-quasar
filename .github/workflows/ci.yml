@@ -45,8 +45,8 @@ jobs:
         run: |
           rocminfo | grep -m1 -E 'Name:.*gfx'
           rocm-smi --showproductname --showmeminfo vram
-      # One binary isolates the old tensor paths, K4 alone, then K4+K1 before
-      # verifying that the full production batch still fits.
+      # One binary isolates the old tensor paths, K4, K4+K1, and the fused
+      # rank-one scan before verifying that the full production batch fits.
       - name: Vulkan stepwise kernel A/B and production recipe
         run: examples/state_passing_ab.sh
       - name: Preserve GPU benchmark logs

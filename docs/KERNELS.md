@@ -214,6 +214,29 @@ Fresh RX 9070 XT run показал, почему пошаговый gate важ
 только доказанный K4. Измеряемые окна заняли 19.880, 17.141, 17.158 и
 41.584 s соответственно — каждое короче минуты.
 
+Третий seam — [revision `585fbe0e`](https://github.com/konard/burn-mamba/commit/585fbe0efdfa2e47dc308ca31fda49affa9bede9) —
+сворачивает все пять стадий rank-one Serial SSD в одну точную recurrence:
+
+```text
+pre   = exp(da) * state
+y     = C * (pre + gamma * B * v)
+state = pre + scale * B * v
+```
+
+Forward запускает один последовательный scan на `[batch, head, p]`, поэтому
+не материализует quadratic intra-chunk `CB [B,N,H,L,L]`. Custom backward
+восстанавливает предыдущий state как `(state - scale * B * v) / exp(da)` и
+также не хранит всю state-history. Его единственный крупный scratch имеет
+форму `[B,T,H,3R]`: около 60 MiB fp32 для `tiny-turbo` micro-batch 4, вместо
+`[B,T,H,P,R]` (около 1.25 GiB). CPU CubeCL тест сравнивает forward и все семь
+градиентов с primitive recurrence на двух chunks; отдельный multi-chunk тест
+фиксирует packed layout, а Vulkan + Fusion проходит compile и clippy с
+warnings-as-errors.
+
+Кандидат пока opt-in через `BURN_MAMBA_FUSED_SINGLE_SCAN=1`. Постоянный A/B
+сравнивает его в том же binary после reference, K4 и K4+K1; production остаётся
+на доказанном K4 до результата на RX 9070 XT.
+
 Каждый следующий seam добавляется только после отдельного A/B. Более широкий
 порт считается готовым только если есть:
 
