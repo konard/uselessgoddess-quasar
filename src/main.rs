@@ -198,7 +198,7 @@ fn main() -> Result<()> {
             // silently building a wider embedding would be dead parameters.
             let mut cfg = shape.apply(preset.config());
             cfg.vocab_size = Shards::open(&data.join("train"))?.meta().vocab_size;
-            let run = run.apply(train::Run::new());
+            let run = run.apply(preset.run_defaults());
             train::run(&cfg, &run, &data, &out, &Device::default())?;
             Ok(())
         }
@@ -308,6 +308,18 @@ impl Preset {
             Self::Toy => config::Model::toy(),
         }
     }
+
+    /// Run defaults that have been validated for one exact production shape.
+    ///
+    /// The retained SSD graph fits `tiny-turbo` at micro-batch 6 on the 16-GB
+    /// target card. Larger presets keep burn-mamba's memory-saving default;
+    /// callers can still select either path explicitly with `--ssd`.
+    fn run_defaults(self) -> train::Run {
+        match self {
+            Self::TinyTurbo => train::Run::new().with_ssd_mode(Some(config::SsdMode::Serial)),
+            Self::Tiny | Self::Base | Self::Toy => train::Run::new(),
+        }
+    }
 }
 
 impl Shape {
@@ -357,5 +369,18 @@ impl Overrides {
             });
         }
         run
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_tiny_turbo_uses_the_measured_ssd_default() {
+        assert_eq!(Preset::TinyTurbo.run_defaults().ssd_mode, Some(config::SsdMode::Serial));
+        assert_eq!(Preset::Tiny.run_defaults().ssd_mode, None);
+        assert_eq!(Preset::Base.run_defaults().ssd_mode, None);
+        assert_eq!(Preset::Toy.run_defaults().ssd_mode, None);
     }
 }
