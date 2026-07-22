@@ -130,13 +130,14 @@ struct Overrides {
     /// Recompute activations in the backward.
     #[arg(long)]
     checkpointing: Option<bool>,
-    /// SSD backward: retain intermediates for speed or recalculate for memory.
+    /// SSD algorithm: serial retains intermediates for speed; recalculated saves memory.
     #[arg(long, value_enum)]
     ssd: Option<Ssd>,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
 enum Ssd {
+    Minimal,
     Serial,
     Recalculated,
 }
@@ -350,6 +351,7 @@ impl Overrides {
         );
         if let Some(ssd) = self.ssd {
             run.ssd_mode = Some(match ssd {
+                Ssd::Minimal => config::SsdMode::Minimal,
                 Ssd::Serial => config::SsdMode::Serial,
                 Ssd::Recalculated => config::SsdMode::Recalculated,
             });

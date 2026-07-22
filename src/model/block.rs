@@ -59,6 +59,7 @@ impl Block {
             // layer pad its sequence with six `cat` allocations.
             Mix::Ssm(ssm) => {
                 let path = match self.ssd_mode {
+                    SsdMode::Minimal => Mamba3SsdPath::Minimal(Some(self.ssd_chunk)),
                     SsdMode::Serial => Mamba3SsdPath::Serial(Some(self.ssd_chunk)),
                     SsdMode::Recalculated => {
                         Mamba3SsdPath::SerialRecalculated(Some(self.ssd_chunk))

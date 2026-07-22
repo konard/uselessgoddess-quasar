@@ -13,11 +13,13 @@ use burn_mamba::mamba3::prelude::{Mamba3Config, Mamba3SsdPath};
 
 /// How burn-mamba evaluates the chunked SSD recurrence during training.
 ///
-/// Both variants have the same forward and gradients. `Recalculated` retains
+/// All variants have the same forward and gradients. `Recalculated` retains
 /// only the inputs of the SSD and rebuilds its intermediates in the backward;
-/// `Serial` lets autodiff retain them. The latter can be faster when it fits.
+/// `Serial` lets autodiff retain the chunkwise intermediates; `Minimal` uses
+/// burn-mamba's mostly-batched formulation and lets autodiff retain its graph.
 #[derive(Config, Debug, PartialEq, Eq)]
 pub enum SsdMode {
+    Minimal,
     Serial,
     Recalculated,
 }

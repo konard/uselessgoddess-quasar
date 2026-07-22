@@ -38,6 +38,7 @@ struct Args {
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum Ssd {
+    Minimal,
     Serial,
     Recalculated,
 }
@@ -62,6 +63,7 @@ impl From<Dtype> for FloatDType {
 impl From<Ssd> for SsdMode {
     fn from(value: Ssd) -> Self {
         match value {
+            Ssd::Minimal => Self::Minimal,
             Ssd::Serial => Self::Serial,
             Ssd::Recalculated => Self::Recalculated,
         }
