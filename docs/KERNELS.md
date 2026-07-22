@@ -1,8 +1,8 @@
 # Оптимизация Mamba-3 на RX 9070 XT
 
 Этот документ фиксирует расследование issue #13: воспроизводимый training-step,
-парные измерения на RX 9070 XT 16 GB, профиль CubeCL и границу между безопасной
-настройкой quasar и отдельным проектом fused Mamba-3 kernel. Все GPU-замеры
+парные измерения на RX 9070 XT 16 GB, профиль CubeCL и пошаговый порт
+burn-mamba kernels с correctness- и performance-контролем. Все GPU-замеры
 выполнены в GitHub Actions на `gfx1201`; локально GPU не использовался.
 
 ## Бенчмарк и правило сравнения
@@ -130,13 +130,38 @@ Matmul занимает около 79% recorded GPU time, но один микр
 и размеры GEMM, и launch/orchestration overhead; оптимизация одного RMSNorm не
 может дать требуемый порядок величины.
 
-## 5. Почему здесь нет «простого CubeCL SSD kernel»
+## 5. Первый CubeCL-шаг: K4 state passing
 
-Закреплённый burn-mamba `34b1e8d` не содержит fused CubeCL Mamba-3 kernel.
-Его backend extension вызывает переносимые Burn tensor-операции для пяти стадий
-SSD. `Serial` оставляет их обычному autodiff; `SerialRecalculated` добавляет
-custom backward, но всё равно пересобирает те же tensor-операции. Поэтому
-переключение enum не может превратить этот путь в один dispatch.
+После профиля fork burn-mamba добавил первую измеримую CubeCL-границу:
+[revision `efea1fdb`](https://github.com/konard/burn-mamba/commit/efea1fdb0289608c26d6d2d31da74a4a03412d4d)
+заменяет K4 — перенос state между 16 chunks. Это не весь Mamba-3, а
+небольшой шаг с однозначной recurrence:
+
+```text
+state[n + 1] = exp(decay[n]) * state[n] + intra[n]
+```
+
+Forward запускает один work item на элемент `[batch, head, p, r]` и
+проходит chunks в регистре. Backward идёт в обратную сторону, сразу
+пишет `d_intra` и contributions для `d_decay`; второй kernel редуцирует
+их по `p × r`. При production-shape единственный дополнительный scratch
+равен одному `[B,N,H,P,R]` tensor, около 20 MiB fp32, а не новой
+копии графа модели.
+
+Прежний high-level K4 остался в том же binary под
+`BURN_MAMBA_FUSED_STATE_PASSING=0`. Поэтому
+[`examples/state_passing_ab.sh`](../examples/state_passing_ab.sh) сравнивает не
+две сборки, а один и тот же artifact, seed, model, warm-up и 49 152 токена.
+CI сохраняет логи и VRAM каждого варианта, проверяет loss и после A/B
+повторяет полный production-batch 131 072 токена для OOM-контроля.
+
+До GPU-замера пройдены два независимых correctness-уровня:
+
+1. CubeCL CPU runtime сравнил values и градиенты `intra`, `decay`,
+   `initial` с tensor reference на random input и non-zero initial state;
+2. шесть double-SSD tests сравнили Serial с Minimal для SISO, MIMO,
+   single-chunk и zero/non-zero initial; Vulkan + Fusion дополнительно
+   проходит compile и `clippy -D warnings`.
 
 Официальная реализация Mamba-3 показывает реальный масштаб порта:
 [forward](https://github.com/state-spaces/mamba/blob/f577286d/mamba_ssm/ops/triton/mamba3/mamba3_siso_fwd.py),
@@ -148,13 +173,8 @@ backward разбит на отдельные `dz/do`, `dqkv`, rotary/bias/angle
 тоже не совпадают буквально: там основной случай `qk=128, v=64`, здесь
 `qk=64, v=64`.
 
-Текущий burn-mamba extension seam начинается уже после rotation/angle
-подготовки и получает `v, B, C, dA, gamma, scale`. Официальный fused forward
-должен стоять выше. Локально реализовать второй generic trait impl нельзя из-за
-Rust coherence, а заменить dependency частичным module override невозможно.
-Рабочий путь — upstream PR в burn-mamba либо временный fork/vendor dependency.
-
-Такой порт считается готовым только если есть:
+Поэтому K4 — первый шаг, а следующие seams добавляются только после
+отдельного A/B. Более широкий порт считается готовым только если есть:
 
 1. forward parity fp32 на нескольких chunk/shape/MIMO вариантах;
 2. gradient parity для каждого входа и параметра, включая finite differences;

@@ -31,9 +31,9 @@ jobs:
       - run: cargo run --release -- budget tiny
       - run: cargo run --release -- budget tiny-turbo
 
-  # A synchronized production-shape optimizer step on the maintainer's GPU.
-  # One complete step is discarded for fusion/autotune warm-up; each measured
-  # three-step window is well below the issue's one-minute experiment budget.
+  # Synchronized issue-shape A/B plus the production optimizer step on the
+  # maintainer's GPU. One complete step is discarded for fusion/autotune
+  # warm-up; every measured three-step window stays below one minute.
   gpu-benchmark:
     runs-on: self-hosted
     timeout-minutes: 15
@@ -45,15 +45,16 @@ jobs:
         run: |
           rocminfo | grep -m1 -E 'Name:.*gfx'
           rocm-smi --showproductname --showmeminfo vram
-      # This is the actual preset recipe, including the compute-efficient
-      # 131072-token batch. The root cubecl.toml supplies the measured stream
-      # limit; every performance argument stays explicit in the log.
-      - name: Vulkan tiny-turbo production recipe
-        run: >-
-          cargo run --release --no-default-features --features vulkan
-          --example train_bench --
-          --model tiny-turbo --micro-batch 4 --accum 32 --warmup 1 --steps 3
-          --dtype f32 --ssd serial --checkpointing false --muon true
+      # The script uses one compiled binary for the exact former K4 and its
+      # CubeCL replacement, then verifies the full production batch still fits.
+      - name: Vulkan state-passing A/B and production recipe
+        run: examples/state_passing_ab.sh
+      - name: Preserve GPU benchmark logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: state-passing-benchmark-logs
+          path: benchmark-logs/
 
   smoke:
     runs-on: ubuntu-latest
