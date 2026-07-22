@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
@@ -55,51 +59,14 @@ jobs:
         run: |
           rocminfo | grep -m1 -E 'Name:.*gfx'
           rocm-smi --showproductname --showmeminfo vram
-      - name: Baseline — recalculated SSD and checkpointing
+      - name: Vulkan baseline — recalculated SSD
         run: >-
-          cargo run --release --no-default-features --features rocm
+          cargo run --release --no-default-features --features vulkan
           --example train_bench -- --micro-batch 6 --accum 8 --warmup 1
           --steps 1 --dtype f32 --ssd recalculated --checkpointing true --muon true
-      - name: BF16 — recalculated SSD and checkpointing
-        continue-on-error: true
+      - name: Vulkan candidate — retained SSD
         run: >-
-          cargo run --release --no-default-features --features rocm
-          --example train_bench -- --micro-batch 6 --accum 8 --warmup 1
-          --steps 1 --dtype bf16 --ssd recalculated --checkpointing true --muon true
-      - name: BF16 — recalculated SSD, retained graph
-        continue-on-error: true
-        run: >-
-          cargo run --release --no-default-features --features rocm
-          --example train_bench -- --micro-batch 6 --accum 8 --warmup 1
-          --steps 1 --dtype bf16 --ssd recalculated --checkpointing false --muon true
-      - name: BF16 — retained SSD and graph
-        continue-on-error: true
-        run: >-
-          cargo run --release --no-default-features --features rocm
-          --example train_bench -- --micro-batch 6 --accum 8 --warmup 1
-          --steps 1 --dtype bf16 --ssd serial --checkpointing false --muon true
-      - name: F16 — recalculated SSD and checkpointing
-        continue-on-error: true
-        run: >-
-          cargo run --release --no-default-features --features rocm
-          --example train_bench -- --micro-batch 6 --accum 8 --warmup 1
-          --steps 1 --dtype f16 --ssd recalculated --checkpointing true --muon true
-      - name: F16 — retained SSD and graph
-        continue-on-error: true
-        run: >-
-          cargo run --release --no-default-features --features rocm
-          --example train_bench -- --micro-batch 6 --accum 8 --warmup 1
-          --steps 1 --dtype f16 --ssd serial --checkpointing false --muon true
-      - name: FP32 — recalculated SSD, retained graph
-        continue-on-error: true
-        run: >-
-          cargo run --release --no-default-features --features rocm
-          --example train_bench -- --micro-batch 6 --accum 8 --warmup 1
-          --steps 1 --dtype f32 --ssd recalculated --checkpointing false --muon true
-      - name: FP32 — retained SSD, checkpointed graph
-        continue-on-error: true
-        run: >-
-          cargo run --release --no-default-features --features rocm
+          cargo run --release --no-default-features --features vulkan
           --example train_bench -- --micro-batch 6 --accum 8 --warmup 1
           --steps 1 --dtype f32 --ssd serial --checkpointing true --muon true
 
