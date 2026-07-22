@@ -105,6 +105,13 @@ cuda = ["gpu", "burn/cuda", "burn-mamba/backend-cuda"]
 
 [profile.release]
 opt-level = 3
+
+# Thin LTO makes every exploratory GPU build substantially slower and only
+# helps once the final binary is linked as a whole. Keep the normal release
+# profile fast to iterate on; opt in for a serious local build explicitly with
+# `cargo build --profile release-lto`.
+[profile.release-lto]
+inherits = "release"
 lto = "thin"
 codegen-units = 1
 

@@ -104,6 +104,11 @@ burn-mamba together — burn's GPU backends are `Fusion<CubeBackend<_>>`, and
 burn-mamba only implements its SSD extension for `Fusion` when its own `fusion`
 feature is on.
 
+The normal `release` profile deliberately skips LTO so GPU experiments do not
+pay a full-program link on every iteration. For an infrequent final local build,
+opt in with `cargo build --profile release-lto`; that separate profile enables
+thin LTO and a single codegen unit.
+
 ## Trying it without a GPU
 
 ```sh
