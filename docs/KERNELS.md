@@ -155,6 +155,21 @@ Forward запускает один work item на элемент `[batch, head,
 CI сохраняет логи и VRAM каждого варианта, проверяет loss и после A/B
 повторяет полный production-batch 131 072 токена для OOM-контроля.
 
+Первый RX 9070 XT A/B на точном head дал положительный, но ожидаемо
+локальный эффект ([CI run 29914868530](https://github.com/uselessgoddess/quasar/actions/runs/29914868530)):
+
+| режим | median throughput | peak VRAM | measured loss |
+| --- | ---: | ---: | --- |
+| reference K4, `4×12` | 9 454 tok/s | 14.970 GiB | 9.9548 → 8.1049 → 6.1827 |
+| CubeCL K4, `4×12` | 9 698 tok/s | 14.922 GiB | 9.9548 → 8.1049 → 6.1827 |
+| CubeCL K4, production `4×32` | 9 897 tok/s | 14.096 GiB | 9.9548 → 8.1049 → 6.1827 |
+
+То есть изолированный K4 даёт **+2.6%** на matched issue recipe и не
+увеличивает измеренный peak VRAM. Три measured шага заняли 19.970 s у
+reference, 17.251 s у CubeCL issue-run и 41.747 s у production-run; каждое
+измерительное окно короче минуты. Медленный первый measured step сохранён в
+расчёте медианы, а длительная JIT-компиляция warm-up в throughput не входит.
+
 До GPU-замера пройдены два независимых correctness-уровня:
 
 1. CubeCL CPU runtime сравнил values и градиенты `intra`, `decay`,
@@ -187,12 +202,13 @@ backward разбит на отдельные `dz/do`, `dqkv`, rotary/bias/angle
 
 В issue один step содержал 49 152 токена. Поэтому 12 500 шагов — 614.4M
 токенов: при 5 966 tok/s это 28.6 часа, при измеренных 9 457 tok/s — **18.0
-часа**. Для 9 часов нужно 18 963 tok/s, для 8 часов — 21 333 tok/s. Этот PR
+часа**, а после K4 при 9 698 tok/s — **17.6 часа**. Для 9 часов нужно
+18 963 tok/s, для 8 часов — 21 333 tok/s. Этот PR
 заметно сокращает ночь, но не выдаёт 18 часов за 8–9.
 
 Production default сохраняет compute-efficient batch `4 × 32 × 1024 = 131072`
-токена на step. Его 12 500 шагов — 1.6384B токенов и около 48.1 часа при той же
-синтетической скорости. Если нужен именно issue-budget, задайте `--accum 12`;
+токена на step. Его 12 500 шагов — 1.6384B токенов и около 46.0 часов при
+измеренных 9 897 tok/s. Если нужен именно issue-budget, задайте `--accum 12`;
 это меняет token budget и должно быть осознанным решением.
 
 `tiny-turbo` уже выбирает `serial`, micro-batch 4, accum 32 и checkpointing
