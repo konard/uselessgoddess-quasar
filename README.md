@@ -8,7 +8,7 @@ layer every fifth, sixth or seventh position:
 
 | | params | fwd FLOPs/token | states fp32 | activations / micro-batch | micro-batches in 16 GiB |
 | --- | --- | --- | --- | --- | --- |
-| `tiny-turbo` | 77.7M | 161.5M | 1.16 GiB | 1.61 GiB | 9 |
+| `tiny-turbo` | 78.4M | 161.2M | 1.17 GiB | 1.27 GiB | 11 |
 | `tiny` | 162.5M | 360.8M | 2.42 GiB | 6.99 GiB | 2 |
 | `base` | 1117.5M | 2306.2M | 16.65 GiB | 24.48 GiB | 0 |
 
@@ -16,7 +16,7 @@ layer every fifth, sixth or seventh position:
 honestly, and explains why this is not a mixture of experts.
 [`docs/MEMORY.md`](docs/MEMORY.md) takes apart the last two columns — where the
 VRAM actually goes, which burn-mamba setting moves it, and what `tiny-turbo`
-gives up to fit nine micro-batches where `tiny` fits two.
+gives up to fit eleven estimated micro-batches where `tiny` fits two.
 
 ## Pipeline
 
@@ -32,6 +32,10 @@ cargo run --release -- tokenizer data/fineweb-edu --vocab-size 32768
 cargo run --release -- prepare data/fineweb-edu --out data/shards
 cargo run --release -- train tiny --data data/shards --out runs/tiny
 
+# measured RX 9070 XT recipe: 640×12, batch 4, serial SSD, no checkpoint replay
+cargo run --release --no-default-features --features vulkan -- \
+    train tiny-turbo --data data/shards --out runs/turbo
+
 cargo run --release -- eval runs/tiny --data data/shards
 cargo run --release -- generate runs/tiny --prompt "The reason"
 ```
@@ -39,7 +43,7 @@ cargo run --release -- generate runs/tiny --prompt "The reason"
 `train` resumes from the newest checkpoint under `--out`, so a run interrupted
 at any point continues where it stopped. Overrides worth knowing:
 `--steps`, `--micro-batch`, `--accum`, `--lr`, `--warmup`, `--decay`,
-`--save-every`, `--eval-every`, `--ssd`.
+`--save-every`, `--eval-every`, `--muon`, `--checkpointing`, `--ssd`.
 
 The default tiny recipe is 12,500 optimizer steps, or 3.2768B tokens with the
 default `8 × 16 × 2048` effective batch. Changing either batch knob also changes
@@ -55,16 +59,17 @@ Redirected output and CI keep the line-oriented logs instead. See
 [`docs/TRAINING_SPEED.md`](docs/TRAINING_SPEED.md) for interpreting these
 numbers and the investigation behind the defaults.
 
-Three knobs decide the memory/speed tradeoff. Muon and checkpointing are on by
-default:
+Three knobs decide the memory/speed tradeoff. Muon is on for every preset.
+Checkpointing is on for the larger presets, while `tiny-turbo` uses the faster
+measured combination `--micro-batch 4 --accum 32 --checkpointing false`:
 `--muon false` puts the hidden matrices back on AdamW (16 B/param of state
 instead of 12, which is what stopped `base` fitting 16 GB), and
 `--checkpointing false` stops recomputing activations in the backward, trading
-memory back for about a third of the step time. `tiny-turbo` also defaults to
-the measured `--ssd serial`, which retains burn-mamba's chunk intermediates and
-was 24–30% faster on a 16-GB RX 9070 XT than the memory-saving
-`--ssd recalculated`; select the latter explicitly if a larger override runs
-out of memory. Other presets retain the memory-saving default. See
+memory for speed. `tiny-turbo` also defaults to measured `--ssd serial`, which
+retains burn-mamba's chunk intermediates. Together with one CubeCL stream and a
+640×12 shape, the matched experiments reached 9.46k tok/s on a 16-GB RX 9070
+XT. Select `--checkpointing true --ssd recalculated` if a larger override runs
+out of memory. Other presets retain the memory-saving defaults. See
 `docs/DESIGN.md` §3 and [`docs/KERNELS.md`](docs/KERNELS.md).
 
 Validation reports negative log-likelihood, perplexity and **bits-per-byte** —

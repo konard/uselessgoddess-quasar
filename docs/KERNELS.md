@@ -1,140 +1,182 @@
 # Оптимизация Mamba-3 на RX 9070 XT
 
-Этот документ фиксирует расследование issue #13: измеренный горячий путь,
-проверенные альтернативы burn-mamba и границы результата. Все GPU-эксперименты
-запускались в GitHub Actions на RX 9070 XT 16 GB. Локально GPU-тесты не
-выполнялись.
+Этот документ фиксирует расследование issue #13: воспроизводимый training-step,
+парные измерения на RX 9070 XT 16 GB, профиль CubeCL и границу между безопасной
+настройкой quasar и отдельным проектом fused Mamba-3 kernel. Все GPU-замеры
+выполнены в GitHub Actions на `gfx1201`; локально GPU не использовался.
 
-## Воспроизводимый бенчмарк
+## Бенчмарк и правило сравнения
 
-`examples/train_bench.rs` выполняет настоящий optimizer step `tiny-turbo`:
+`examples/train_bench.rs` выполняет настоящий optimizer step: полный словарь
+32 768, language-model loss, backward, накопление градиента и Muon/AdamW.
+Только чтение корпуса и запись checkpoint исключены. Токены синтетические и
+детерминированные, `device.sync()` стоит после каждого полного шага.
 
-- полный словарь 32 768 и настоящий language-model head/loss;
-- `seq_len=1024`, `micro_batch=6`, `accum=8`, Muon и fp32, как в ночном
-  обучении из issue;
-- синтетические детерминированные токены вместо чтения корпуса;
-- один полный warm-up step для fusion/autotune, затем один синхронизированный
-  измеряемый step.
+Каждый вариант получает один warm-up и три измеряемых шага; результат — медиана.
+Первый measured step иногда всё ещё оплачивает autotune, поэтому одиночный шаг
+не считается устойчивым результатом. В парных A/B сохраняется одинаковое число
+токенов на optimizer step — 49 152 (`seq_len=1024`), даже когда меняются
+`micro_batch` и `accum`. Каждое измеряемое окно короче минуты.
 
-В измеряемую область входят восемь forward/backward micro-batches и шаг
-оптимизатора. Один такой step содержит 49 152 токена и длится меньше минуты;
-долгий первый запуск — это компиляция и autotune, а не само измерение.
+Production-рецепт можно проверить так:
 
 ```sh
-cargo run --release --no-default-features --features rocm \
-  --example train_bench -- --micro-batch 6 --accum 8 --warmup 1 --steps 1 \
-  --dtype f32 --ssd recalculated --checkpointing true --muon true
+cargo run --release --no-default-features --features vulkan \
+  --example train_bench -- --model tiny-turbo --micro-batch 4 --accum 32 \
+  --warmup 1 --steps 3 --dtype f32 --ssd serial \
+  --checkpointing false --muon true
 ```
 
-Абсолютная скорость короткого синтетического запуска ниже установившихся
-~6000 tok/s ночного обучения: единственный warm-up не прогревает долгоживущий
-процесс так же, как тысячи шагов. Поэтому вывод об ускорении основан на парном
-A/B в одном job и на одинаковой loss, а не на сравнении этих двух разных
-запусков.
+Для точного повтора issue-batch замените `--accum 32` на `--accum 12`.
 
-## Найденная причина: двойной recompute
+## 1. Двойной recompute
 
-В исходной конфигурации одновременно работали два независимых механизма:
+В исходной форме одновременно работали два механизма:
 
-1. `device.gradient_checkpointing()` сохраняет вход блока и повторяет весь блок
-   в backward;
-2. `Mamba3SsdPath::SerialRecalculated` имеет собственный custom backward,
-   который ещё раз восстанавливает промежуточные результаты пяти стадий SSD.
+1. `device.gradient_checkpointing()` повторял весь `Block` в backward;
+2. burn-mamba `SerialRecalculated` повторно строил пять стадий SSD в своём
+   custom backward.
 
-На `tiny-turbo` внешний checkpointing нужен, чтобы `micro_batch=6` надёжно
-помещался. Но внутренний recompute burn-mamba уже не нужен: обычный
-`Mamba3SsdPath::Serial` оставляет autodiff управлять chunkwise-графом. Параметры,
-forward и математические градиенты у режимов одинаковы; меняется только
-компромисс память/повторные вычисления.
+Первый парный A/B оставил внешний checkpointing и заменил только SSD backward.
+Loss совпал внутри каждого backend:
 
-## Результат ROCm
+| backend | SSD | tok/s | изменение |
+| --- | --- | ---: | ---: |
+| ROCm, [run 29901656398](https://github.com/uselessgoddess/quasar/actions/runs/29901656398) | `recalculated` | 3 616 | — |
+| ROCm | `serial` | 4 485 | +24.0% |
+| Vulkan, [run 29903226239](https://github.com/uselessgoddess/quasar/actions/runs/29903226239) | `recalculated` | 4 834 | — |
+| Vulkan | `serial` | 6 274 | +29.8% |
+| Vulkan | `minimal` | 6 313 | +0.6% к `serial` |
 
-[GitHub Actions run 29901656398](https://github.com/uselessgoddess/quasar/actions/runs/29901656398)
-на `gfx1201`, один и тот же commit и входы:
+`minimal` не дал сигнала больше шума и хранит более крупный autodiff-граф,
+поэтому выбран проверенный `serial`. `recalculated` остаётся memory-saving
+fallback для больших форм.
 
-| SSD backward | checkpointing | loss | step | throughput | effective |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| `recalculated` | да | 10.2408 | 13.591 s | 3 616 tok/s | 1.75 TFLOP/s |
-| `serial` | да | 10.2408 | 10.959 s | 4 485 tok/s | 2.17 TFLOP/s |
+Следующий matched-token A/B ([run 29907443070](https://github.com/uselessgoddess/quasar/actions/runs/29907443070))
+проверил внешний checkpointing и число Fusion streams:
 
-`serial` даёт **+24.0% tok/s** и сокращает step на **19.4%**. Кандидат прошёл
-полный forward, backward и Muon/AdamW step при `micro_batch=6` на 16-GB карте,
-то есть это не оценка отдельного kernel и не inference-only результат.
+| micro-batch × accum | checkpointing | streams | median tok/s |
+| --- | ---: | ---: | ---: |
+| 6 × 8 | да | 128 | 7 359 |
+| 4 × 12 | нет | 128 | 8 406 |
+| 4 × 12 | нет | 1 | **8 608** |
+| 6 × 8 | нет | 1 | 2 715 |
 
-## Подтверждение на Vulkan и выбор варианта
+Micro-batch 4 без checkpointing даёт +17.0% к исходной строке, а один stream —
+ещё +2.4%. Вариант batch 6 формально помещается, но VRAM pressure делает его в
+три раза медленнее; «не OOM» не означает полезную конфигурацию. Корневой
+`cubecl.toml` теперь закрепляет `max_streams=1`, как и примеры burn-mamba:
+несколько Fusion streams удерживали одновременно больше live-буферов. Старый
+лимит 128 для воспроизведения лежит в `experiments/default-streams`.
 
-[GitHub Actions run 29903226239](https://github.com/uselessgoddess/quasar/actions/runs/29903226239)
-повторил полный step на том же `gfx1201` через Vulkan:
+## 2. Форма GPU важнее одинакового числа FLOPs
 
-| SSD backward | loss | step | throughput | effective |
+После освобождения VRAM paired shape A/B сохранил практически тот же размер и
+арифметику, но дал GPU более широкие GEMM и на 40% меньше последовательных
+слоёв ([run 29908071337](https://github.com/uselessgoddess/quasar/actions/runs/29908071337)):
+
+| форма | params | fwd FLOPs/token | активации / micro-batch | median tok/s |
 | --- | ---: | ---: | ---: | ---: |
-| `recalculated` | 10.2460 | 10.169 s | 4 834 tok/s | 2.34 TFLOP/s |
-| `serial` | 10.2460 | 7.834 s | 6 274 tok/s | 3.04 TFLOP/s |
-| `minimal` | 10.2460 | 7.786 s | 6 313 tok/s | 3.06 TFLOP/s |
+| legacy 512 × 20 | 77.7M | 161.5M | 1 649 MiB | 8 709 |
+| production 640 × 12 | 78.4M | 161.2M | 1 304 MiB | **9 457** |
 
-`serial` повторяет эффект на втором backend: **+29.8% tok/s**, step короче на
-**23.0%**. `minimal` быстрее `serial` лишь на 0.62% в одном измерении — это
-меньше надёжного сигнала для смены алгоритма, при этом он хранит более крупный
-autodiff-граф. Поэтому measured-default `tiny-turbo` — `serial`, а `minimal`
-остаётся доступным только для явных экспериментов.
+Production-форма быстрее на 8.6%, активации ниже на 20.9%, а attention-head
+остаётся шириной 64 (`10 × 64`). Это performance-эквивалент, а не доказательство
+равного качества: меньшая глубина может проиграть на длинном обучении, поэтому
+quality нужно сравнивать отдельным loss/bpb run на одинаковом числе токенов.
 
-В quasar добавлен `--ssd`; `tiny-turbo` выбирает `serial` автоматически.
-`--ssd recalculated` остаётся безопасным fallback для более крупных форм или
-micro-batch, которым не хватает памяти. Другие пресеты не меняют прежний
-memory-saving default.
+Итого устойчивое paired-ускорение выбранной формы относительно текущего
+baseline 7 359 tok/s — **+28.5%**. Относительно 5 966 tok/s на приложенном
+ночном скриншоте это +58.5%, но это справочная cross-run цифра, не paired A/B.
 
-## Отрицательные результаты
+## 3. Precision: не AMP
 
-Они важны, потому что не дают превратить гипотезу в опасный default.
+[Run 29908650819](https://github.com/uselessgoddess/quasar/actions/runs/29908650819)
+повторил fp32 (9 433 tok/s) и проверил низкие dtype на той же карте:
 
-- `bf16` и `f16` на закреплённых Burn/CubeCL и ROCm завершились ещё при
-  компиляции ядра: LLVM не смог выбрать RDNA4-инструкции
-  `llvm.amdgcn.wmma.f32.16x16x16.{bf16,f16}`. Поэтому простое переключение dtype
-  не является рабочим AMP и в production не включено.
-- fp32 `recalculated` без внешнего checkpointing исчерпал VRAM и завершился в
-  HIP `vmheap.cpp:175 MapPhysMemory`. Значит, отключить checkpointing для
-  `micro_batch=6` нельзя.
-- Ручной CubeCL RMSNorm-прототип удалён. Он не был подключён к модели, проверял
-  только forward на CPU и занимал 5–9 минут LLVM-JIT сборки. GPU backend Burn
-  уже fusion-компилирует поэлементную цепочку RMSNorm, поэтому прототип не
-  подтверждал и не давал ускорения обучения.
+- Vulkan сразу отвергает bf16: device не поддерживает запрошенный `BF16`;
+- f16 падает в `burn-cubecl-fusion` при codegen/autotune и заканчивает шаг с
+  non-finite loss;
+- прежние ROCm-пробы bf16/f16 не смогли выбрать RDNA4 WMMA-инструкции LLVM.
 
-## Почему остаётся далеко до 48 TFLOP/s
+Даже успешный pure-f16 запуск не был бы AMP: в этой ревизии Burn нет autocast и
+`GradScaler`, dtype применяется к параметрам, активациям и optimizer state
+сразу. Подтверждение ограничения есть в
+[Burn issue #4332](https://github.com/tracel-ai/burn/issues/4332). Поэтому fp32
+остаётся единственным проверенным training default.
 
-48 TFLOP/s — пик больших плотных матричных умножений. `tiny-turbo` узкая
-(`d_model=512`, `d_inner=1024`, `head_dim=64`), а SSD состоит из многих
-транспозиций, broadcast/exp/cumsum и небольших batched matmul. Этот путь
-ограничен трафиком памяти и launch overhead задолго до ALU-пика. Устранение
-лишнего backward поднимает полезную загрузку с 1.75 до 2.17 TFLOP/s на ROCm и
-с 2.34 до 3.04 TFLOP/s на Vulkan, но не меняет форму этих операций.
+## 4. Что показал CubeCL profiler
 
-Следующий крупный шаг потребовал бы fused SSD forward **и custom backward** в
-burn-mamba/CubeCL. Это не локальная замена одного expression: ядро должно
-реализовать chunk recurrence, causal mask, Mamba-3 diagonal correction, MIMO и
-градиенты всех входов. Без отдельной проверки параметров после optimizer step
-ошибка может молча портить многочасовое обучение. Поэтому этот PR сначала
-использует уже существующую и проверенную burn-mamba формулировку `Serial`, а
-такой rewrite оставляет отдельной upstream-работой.
+Profiler ставит timestamp вокруг каждого launch и сериализует выполнение,
+поэтому его 266 tok/s нельзя сравнивать с throughput. Полезен состав одного
+`micro_batch=1`, `accum=1` шага после warm-up:
 
-## Как применять
+| группа | GPU duration | launches | доля recorded GPU time |
+| --- | ---: | ---: | ---: |
+| fused matmul | 99.14 ms | 644 | 27% |
+| simple matmul | 96.53 ms | 373 | 26% |
+| double-buffered matmul | 86.66 ms | 324 | 24% |
+| elementwise fusion | 18.37 ms | 1 720 | 5% |
+| add kernels | 21.01 ms | 544 | 5% |
+| cumulative sum | 10.23 ms | 92 | 2% |
+| ordinary reductions | 4.76 ms | 898 | 1% |
+| все группы | 360.72 ms | **9 948** | 100% |
 
-Для измеренной конфигурации RX 9070 XT:
+Matmul занимает около 79% recorded GPU time, но один микробатч всё равно
+диспетчеризует почти десять тысяч kernels: кроме таблицы это 834 slice-assign,
+779 fill, 763 scalar-multiply, 550 copy и сотни других запусков. Wall time шага
+с profiler — 3.844 s против 0.361 s суммарных timestamps. Значит узкое место —
+и размеры GEMM, и launch/orchestration overhead; оптимизация одного RMSNorm не
+может дать требуемый порядок величины.
+
+## 5. Почему здесь нет «простого CubeCL SSD kernel»
+
+Закреплённый burn-mamba `34b1e8d` не содержит fused CubeCL Mamba-3 kernel.
+Его backend extension вызывает переносимые Burn tensor-операции для пяти стадий
+SSD. `Serial` оставляет их обычному autodiff; `SerialRecalculated` добавляет
+custom backward, но всё равно пересобирает те же tensor-операции. Поэтому
+переключение enum не может превратить этот путь в один dispatch.
+
+Официальная реализация Mamba-3 показывает реальный масштаб порта:
+[forward](https://github.com/state-spaces/mamba/blob/f577286d/mamba_ssm/ops/triton/mamba3/mamba3_siso_fwd.py),
+[combined wrapper](https://github.com/state-spaces/mamba/blob/f577286d/mamba_ssm/ops/triton/mamba3/mamba3_siso_combined.py)
+и [backward](https://github.com/state-spaces/mamba/blob/f577286d/mamba_ssm/ops/triton/mamba3/mamba3_siso_bwd.py).
+Forward фьюзит bias, rotary/QK, decay, intra/inter-chunk state и output;
+backward разбит на отдельные `dz/do`, `dqkv`, rotary/bias/angle,
+`ddt/dtrap/input-state` и angle-cumsum kernels. Оптимизированные Triton shapes
+тоже не совпадают буквально: там основной случай `qk=128, v=64`, здесь
+`qk=64, v=64`.
+
+Текущий burn-mamba extension seam начинается уже после rotation/angle
+подготовки и получает `v, B, C, dA, gamma, scale`. Официальный fused forward
+должен стоять выше. Локально реализовать второй generic trait impl нельзя из-за
+Rust coherence, а заменить dependency частичным module override невозможно.
+Рабочий путь — upstream PR в burn-mamba либо временный fork/vendor dependency.
+
+Такой порт считается готовым только если есть:
+
+1. forward parity fp32 на нескольких chunk/shape/MIMO вариантах;
+2. gradient parity для каждого входа и параметра, включая finite differences;
+3. совпадение параметров после полного Muon/AdamW optimizer step;
+4. stress test на sequence, не кратной предпочитаемому tile;
+5. GPU A/B с одинаковым token budget, finite loss и проверкой VRAM;
+6. custom backward — forward-only kernel обучение не ускорит достаточно.
+
+## 6. Wall-clock без обещаний
+
+В issue один step содержал 49 152 токена. Поэтому 12 500 шагов — 614.4M
+токенов: при 5 966 tok/s это 28.6 часа, при измеренных 9 457 tok/s — **18.0
+часа**. Для 9 часов нужно 18 963 tok/s, для 8 часов — 21 333 tok/s. Этот PR
+заметно сокращает ночь, но не выдаёт 18 часов за 8–9.
+
+Production default сохраняет compute-efficient batch `4 × 32 × 1024 = 131072`
+токена на step. Его 12 500 шагов — 1.6384B токенов и около 48.1 часа при той же
+синтетической скорости. Если нужен именно issue-budget, задайте `--accum 12`;
+это меняет token budget и должно быть осознанным решением.
+
+`tiny-turbo` уже выбирает `serial`, micro-batch 4, accum 32 и checkpointing
+off. При OOM после shape override верните память явно:
 
 ```sh
-cargo run --release --no-default-features --features rocm -- \
-  train tiny-turbo --data data/shards --out runs/turbo-24h \
-  --micro-batch 6 --accum 8 --muon true
+--checkpointing true --ssd recalculated
 ```
-
-У этого пресета `serial` уже включён; явное `--ssd serial` эквивалентно.
-
-Если форма стала больше или backend сообщает OOM, верните память ценой
-скорости:
-
-```sh
---ssd recalculated
-```
-
-Обычный `release` намеренно не делает thin LTO: время host-link не влияет на
-GPU step, но замедляет каждый эксперимент. Для редкой финальной сборки есть
-отдельный `--profile release-lto`.
