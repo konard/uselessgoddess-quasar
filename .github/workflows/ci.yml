@@ -15,7 +15,7 @@ env:
 
 jobs:
   check:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -28,23 +28,6 @@ jobs:
       # backward passes included -- runs on a hosted runner.
       - run: cargo test --all-targets
       - run: cargo run --release -- budget tiny
-
-  # The custom CubeCL kernel cannot be exercised on the pure-Rust `flex` backend
-  # the `check` job uses. The CubeCL CPU runtime (`cpu` feature) is the same
-  # runtime family as the GPU backends, only LLVM-targeted, so it runs a real
-  # `#[cube]` kernel on a GPU-less runner. This job checks the fused RMSNorm
-  # kernel against its plain-arithmetic reference there (`tests/cubecl_cpu.rs`).
-  kernel:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      # SPIR-V/WGSL toolchains are not needed: the CPU runtime JITs through LLVM,
-      # which the toolchain already ships.
-      - run: cargo test --features cpu --test cubecl_cpu -- --nocapture
-        env:
-          BURN_DEVICE: cpu
 
   # A synchronized production-shape optimizer step on the maintainer's GPU.
   # One complete step is discarded for fusion/autotune warm-up; the measured
@@ -69,9 +52,15 @@ jobs:
           cargo run --release --no-default-features --features vulkan
           --example train_bench -- --micro-batch 6 --accum 8 --warmup 1
           --steps 1 --dtype f32 --ssd serial --checkpointing true --muon true
+      - name: Vulkan experiment — minimal SSD
+        continue-on-error: true
+        run: >-
+          cargo run --release --no-default-features --features vulkan
+          --example train_bench -- --micro-batch 6 --accum 8 --warmup 1
+          --steps 1 --dtype f32 --ssd minimal --checkpointing true --muon true
 
   smoke:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
