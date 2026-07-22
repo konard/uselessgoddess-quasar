@@ -148,12 +148,17 @@ mod tests {
 
     #[test]
     fn ssd_modes_agree_after_an_optimizer_step() {
-        fn step(mode: config::SsdMode) -> f32 {
-            let cfg = config::Model::toy();
-            let device = Device::default().autodiff().gradient_checkpointing();
-            device.seed(13);
+        let cfg = config::Model::toy();
+        let device = Device::default().autodiff().gradient_checkpointing();
+        let record = Quasar::new(&cfg, &device).into_record();
+
+        let step = |mode: config::SsdMode| -> f32 {
             let tokens = Tensor::<2, Int>::zeros([2, cfg.seq_len], &device);
-            let mut model = Quasar::new_with_ssd(&cfg, mode.clone(), &device);
+            // Device seeding is global to the backend and races with other
+            // tests running in parallel. Loading one shared record makes the
+            // initial parameters identical and isolates the SSD algorithm.
+            let mut model =
+                Quasar::new_with_ssd(&cfg, mode.clone(), &device).load_record(record.clone());
             let run = Run::new().with_ssd_mode(Some(mode));
             let mut optim = Optim::new(&run, &model);
 
@@ -162,7 +167,7 @@ mod tests {
             model = optim.step(run.lr, model);
 
             model.loss(tokens.clone(), tokens).nll.into_scalar::<f32>()
-        }
+        };
 
         let serial = step(config::SsdMode::Serial);
         let recalculated = step(config::SsdMode::Recalculated);
