@@ -62,8 +62,8 @@ pub struct Run {
     #[config(default = true)]
     pub checkpointing: bool,
     /// SSD-specific memory/speed tradeoff. `None` keeps burn-mamba's
-    /// memory-efficient recalculated backward. This is optional so run files
-    /// written before the knob existed remain readable.
+    /// memory-efficient recalculated backward; `Serial` retains intermediates
+    /// and is faster when they fit. Optional so older run files remain readable.
     #[config(default = "None")]
     pub ssd_mode: Option<config::SsdMode>,
     #[config(default = 1337)]

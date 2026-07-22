@@ -92,6 +92,7 @@ impl Loss {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::train::{Optim, Run};
 
     #[test]
     fn analytic_budget_matches_the_real_module() {
@@ -143,5 +144,31 @@ mod tests {
         let after = delta.slice([0..1, 3..8, 0..cfg.vocab_size]).max();
         assert!(before.into_scalar::<f32>() < 1e-6, "position 2 must not leak backwards");
         assert!(after.into_scalar::<f32>() > 1e-6, "position 2 must reach later positions");
+    }
+
+    #[test]
+    fn ssd_modes_agree_after_an_optimizer_step() {
+        fn step(mode: config::SsdMode) -> f32 {
+            let cfg = config::Model::toy();
+            let device = Device::default().autodiff().gradient_checkpointing();
+            device.seed(13);
+            let tokens = Tensor::<2, Int>::zeros([2, cfg.seq_len], &device);
+            let mut model = Quasar::new_with_ssd(&cfg, mode.clone(), &device);
+            let run = Run::new().with_ssd_mode(Some(mode));
+            let mut optim = Optim::new(&run, &model);
+
+            let grads = model.loss(tokens.clone(), tokens.clone()).total.backward();
+            optim.accumulate(&model, grads);
+            model = optim.step(run.lr, model);
+
+            model.loss(tokens.clone(), tokens).nll.into_scalar::<f32>()
+        }
+
+        let serial = step(config::SsdMode::Serial);
+        let recalculated = step(config::SsdMode::Recalculated);
+        let minimal = step(config::SsdMode::Minimal);
+
+        assert!((serial - recalculated).abs() < 1e-4, "serial {serial} vs {recalculated}");
+        assert!((minimal - recalculated).abs() < 1e-4, "minimal {minimal} vs {recalculated}");
     }
 }
