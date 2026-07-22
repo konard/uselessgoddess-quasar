@@ -16,6 +16,7 @@ env:
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -34,6 +35,7 @@ jobs:
   # step itself is well below the issue's one-minute experiment budget.
   gpu-benchmark:
     runs-on: self-hosted
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -42,25 +44,15 @@ jobs:
         run: |
           rocminfo | grep -m1 -E 'Name:.*gfx'
           rocm-smi --showproductname --showmeminfo vram
-      - name: Vulkan baseline — recalculated SSD
-        run: >-
-          cargo run --release --no-default-features --features vulkan
-          --example train_bench -- --micro-batch 6 --accum 8 --warmup 1
-          --steps 1 --dtype f32 --ssd recalculated --checkpointing true --muon true
-      - name: Vulkan candidate — retained SSD
+      - name: Vulkan tiny-turbo — retained SSD
         run: >-
           cargo run --release --no-default-features --features vulkan
           --example train_bench -- --micro-batch 6 --accum 8 --warmup 1
           --steps 1 --dtype f32 --ssd serial --checkpointing true --muon true
-      - name: Vulkan experiment — minimal SSD
-        continue-on-error: true
-        run: >-
-          cargo run --release --no-default-features --features vulkan
-          --example train_bench -- --micro-batch 6 --accum 8 --warmup 1
-          --steps 1 --dtype f32 --ssd minimal --checkpointing true --muon true
 
   smoke:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
