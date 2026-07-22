@@ -214,8 +214,10 @@ Fresh RX 9070 XT run показал, почему пошаговый gate важ
 только доказанный K4. Измеряемые окна заняли 19.880, 17.141, 17.158 и
 41.584 s соответственно — каждое короче минуты.
 
-Третий seam — [revision `585fbe0e`](https://github.com/konard/burn-mamba/commit/585fbe0efdfa2e47dc308ca31fda49affa9bede9) —
-сворачивает все пять стадий rank-one Serial SSD в одну точную recurrence:
+Третий seam начался с
+[revision `585fbe0e`](https://github.com/konard/burn-mamba/commit/585fbe0efdfa2e47dc308ca31fda49affa9bede9),
+которая сворачивает все пять стадий rank-one Serial SSD в одну точную
+recurrence:
 
 ```text
 pre   = exp(da) * state
@@ -223,19 +225,57 @@ y     = C * (pre + gamma * B * v)
 state = pre + scale * B * v
 ```
 
-Forward запускает один последовательный scan на `[batch, head, p]`, поэтому
-не материализует quadratic intra-chunk `CB [B,N,H,L,L]`. Custom backward
-восстанавливает предыдущий state как `(state - scale * B * v) / exp(da)` и
-также не хранит всю state-history. Его единственный крупный scratch имеет
-форму `[B,T,H,3R]`: около 60 MiB fp32 для `tiny-turbo` micro-batch 4, вместо
-`[B,T,H,P,R]` (около 1.25 GiB). CPU CubeCL тест сравнивает forward и все семь
-градиентов с primitive recurrence на двух chunks; отдельный multi-chunk тест
-фиксирует packed layout, а Vulkan + Fusion проходит compile и clippy с
-warnings-as-errors.
+Forward запускает один последовательный scan на `[batch, head, p]`, поэтому не
+материализует quadratic intra-chunk `CB [B,N,H,L,L]`. Первая версия backward
+восстанавливала предыдущий state как
+`(state - scale * B * v) / exp(da)` по всей последовательности. На коротком CPU
+тесте это было точно, но первый GPU A/B
+([run 29922391327](https://github.com/uselessgoddess/quasar/actions/runs/29922391327))
+получил non-finite loss на первом measured step — без OOM. Добавленный до
+исправления 1024-token Serial parity test воспроизвёл причину: при checkpoint
+interval 64 ошибки `dC` и `dDa` выросли до 3.57M и 3.46M.
 
-Кандидат пока opt-in через `BURN_MAMBA_FUSED_SINGLE_SCAN=1`. Постоянный A/B
-сравнивает его в том же binary после reference, K4 и K4+K1; production остаётся
-на доказанном K4 до результата на RX 9070 XT.
+[Revision `21775a91`](https://github.com/konard/burn-mamba/commit/21775a91737893fe64a4e4f953f9326dc6294351)
+ограничивает обратную реконструкцию восемью токенами. Checkpoint history для
+production-слоя занимает около 160 MiB вместо примерно 1.25 GiB полного
+per-token state history; `[B,T,H,3R]` reduction scratch — около 60 MiB. На
+1024 токенах максимальные absolute differences с Serial равны `3e-6` для
+output, `2e-6` для `dV`, `3e-6` для `dB`, `2e-6` для `dC`, `4e-6` для `dDa`
+и `1.2e-5` для `dScale`; `dGamma`, final state и `dInitialState` совпали до
+напечатанной точности. Все семь градиентов конечны. Cube CPU test использует 9
+токенов и тем самым пересекает один полный K8 interval и неполный последний.
+
+После стабильного GPU A/B
+[revision `ca1618b4`](https://github.com/konard/burn-mamba/commit/ca1618b4ba6858cb5dff4cfa1edae3232312ff79)
+включает fused scan по умолчанию только для CubeCL. Reference остаётся доступен
+через `BURN_MAMBA_FUSED_SINGLE_SCAN=0`, а non-CubeCL backends продолжают
+использовать прежний tensor path. Полный Burn diff отправлен в
+[upstream PR #20](https://github.com/swfsql/burn-mamba/pull/20), а Quasar
+временно содержит ту же ветку как `vendor/burn-mamba` git subtree, чтобы код
+ядра и benchmark не могли разъехаться.
+
+Финальный fixed-seed A/B на точном head
+([run 29926495540](https://github.com/uselessgoddess/quasar/actions/runs/29926495540)):
+
+| режим | median throughput | изменение | peak VRAM |
+| --- | ---: | ---: | ---: |
+| tensor reference | 9 571 tok/s | — | 14.974 GiB |
+| CubeCL K4 | 9 818 tok/s | +2.6% | 14.096 GiB |
+| CubeCL K4 + opt-in K1 | 9 809 tok/s | −0.1% к K4 | 14.093 GiB |
+| fused rank-one scan | 10 368 tok/s | +5.6% к K4, +8.3% total | 14.074 GiB |
+| fused production `4×32` | **10 578 tok/s** | OOM-check | 14.074 GiB |
+
+Во всех режимах measured loss совпал (`9.9548 → 8.1049 → 6.1827`). Суммы
+трёх measured steps равны 19.725, 17.052, 17.017, 16.245 и 39.124 s: каждое
+окно короче минуты, production batch завершился без OOM.
+
+Обновление subtree воспроизводится отдельно от Quasar:
+
+```sh
+git remote add burn-mamba https://github.com/konard/burn-mamba.git
+git fetch burn-mamba issue-13-cubecl
+git subtree pull --prefix vendor/burn-mamba burn-mamba issue-13-cubecl --squash
+```
 
 Каждый следующий seam добавляется только после отдельного A/B. Более широкий
 порт считается готовым только если есть:
@@ -250,14 +290,13 @@ warnings-as-errors.
 ## 6. Wall-clock без обещаний
 
 В issue один step содержал 49 152 токена. Поэтому 12 500 шагов — 614.4M
-токенов: при 5 966 tok/s это 28.6 часа, при измеренных 9 457 tok/s — **18.0
-часа**, а после K4 при 9 698 tok/s — **17.6 часа**. Для 9 часов нужно
-18 963 tok/s, для 8 часов — 21 333 tok/s. Этот PR
-заметно сокращает ночь, но не выдаёт 18 часов за 8–9.
+токенов: при 5 966 tok/s это 28.6 часа, а при финальных 10 368 tok/s — **16.5
+часа**. Для 9 часов нужно 18 963 tok/s, для 8 часов — 21 333 tok/s. Этот PR
+заметно сокращает ночь, но не выдаёт 16.5 часа за 8–9.
 
 Production default сохраняет compute-efficient batch `4 × 32 × 1024 = 131072`
-токена на step. Его 12 500 шагов — 1.6384B токенов и около 46.0 часов при
-измеренных 9 897 tok/s. Если нужен именно issue-budget, задайте `--accum 12`;
+токена на step. Его 12 500 шагов — 1.6384B токенов и около **43.0 часа** при
+измеренных 10 578 tok/s. Если нужен именно issue-budget, задайте `--accum 12`;
 это меняет token budget и должно быть осознанным решением.
 
 `tiny-turbo` уже выбирает `serial`, micro-batch 4, accum 32 и checkpointing

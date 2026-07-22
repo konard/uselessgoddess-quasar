@@ -67,9 +67,12 @@ instead of 12, which is what stopped `base` fitting 16 GB), and
 `--checkpointing false` stops recomputing activations in the backward, trading
 memory for speed. `tiny-turbo` also defaults to measured `--ssd serial`, which
 retains burn-mamba's chunk intermediates. Together with one CubeCL stream and a
-640×12 shape, the matched experiments reached 9.46k tok/s on a 16-GB RX 9070
-XT. Select `--checkpointing true --ssd recalculated` if a larger override runs
-out of memory. Other presets retain the memory-saving defaults. See
+640×12 shape, the final matched experiment reached 10.37k tok/s on a 16-GB RX
+9070 XT; the full production batch reached 10.58k tok/s. The vendored
+burn-mamba branch uses a measured fused CubeCL rank-one scan by default and
+retains `BURN_MAMBA_FUSED_SINGLE_SCAN=0` as a reference-path escape hatch.
+Select `--checkpointing true --ssd recalculated` if a larger override runs out
+of memory. Other presets retain the memory-saving defaults. See
 `docs/DESIGN.md` §3 and [`docs/KERNELS.md`](docs/KERNELS.md).
 
 Validation reports negative log-likelihood, perplexity and **bits-per-byte** —

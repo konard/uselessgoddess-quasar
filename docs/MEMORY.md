@@ -227,10 +227,11 @@ throughput-рекомендацию.
 ## 6. Что измерено на карте
 
 GitHub Actions на RX 9070 XT подтвердил не аналитический максимум, а безопасную
-скоростную точку: batch 4, accum 32, `Serial`, checkpointing off и один CubeCL
-stream. При issue-budget accum 12 эта форма дала 9457 tok/s. Форма 640 × 12
-быстрее прежней 512 × 20 на 8.6% при тех же params/FLOPs, а полный набор
-настроек быстрее matched baseline на 28.5%.
+скоростную точку: batch 4, accum 32, `Serial`, checkpointing off, один CubeCL
+stream и fused rank-one scan. При issue-budget accum 12 эта форма дала 10 368
+tok/s; production accum 32 — 10 578 tok/s при пике 14.074 GiB. Форма 640 × 12
+быстрее прежней 512 × 20 на 8.6% при тех же params/FLOPs, а CubeCL K4 и fused
+scan дают ещё +2.6% и +5.6% на финальном matched A/B.
 
 Не подтверждены как production defaults: batch 6 без checkpointing (помещается,
 но втрое медленнее), bf16/f16 (backend error/panic/non-finite loss) и
