@@ -44,35 +44,31 @@ jobs:
         run: |
           rocminfo | grep -m1 -E 'Name:.*gfx'
           rocm-smi --showproductname --showmeminfo vram
-      - name: Vulkan tiny-turbo — retained SSD
-        run: >-
-          cargo run --release --no-default-features --features vulkan
-          --example train_bench -- --micro-batch 6 --accum 8 --warmup 1
-          --steps 3 --dtype f32 --ssd serial --checkpointing true --muon true
-      # Same 49,152-token optimizer step, but retain the outer autodiff graph
-      # and trade batch width for accumulation.  This directly tests the
-      # maintainer's micro-batch=4 hypothesis without changing the token budget.
-      - name: Vulkan tiny-turbo — no checkpoint, micro-batch 4
-        run: >-
-          cargo run --release --no-default-features --features vulkan
-          --example train_bench -- --micro-batch 4 --accum 12 --warmup 1
-          --steps 3 --dtype f32 --ssd serial --checkpointing false --muon true
-      # burn-mamba caps CubeCL at one stream in its own examples to stop stale
-      # Fusion streams retaining VRAM.  Repeat micro-batch 4 to isolate the
-      # stream setting, then see whether the saved memory makes batch 6 fit
-      # without the outer checkpoint/recompute pass.
-      - name: Vulkan tiny-turbo — one stream, no checkpoint, micro-batch 4
+      # The preceding matched-token A/B selected one stream, micro-batch 4 and
+      # no outer checkpointing. Use it as the paired baseline for a 640 x 12
+      # candidate with almost identical parameters and FLOPs to 512 x 20.
+      - name: Vulkan tiny-turbo 512x20
         working-directory: experiments/single-stream
         run: >-
           cargo run --manifest-path ../../Cargo.toml --release
           --no-default-features --features vulkan --example train_bench --
           --micro-batch 4 --accum 12 --warmup 1 --steps 3 --dtype f32
           --ssd serial --checkpointing false --muon true
-      - name: Vulkan tiny-turbo — one stream, no checkpoint, micro-batch 6
+      - name: Vulkan wide-turbo 640x12 — micro-batch 4
         working-directory: experiments/single-stream
         run: >-
           cargo run --manifest-path ../../Cargo.toml --release
           --no-default-features --features vulkan --example train_bench --
+          --model wide-turbo --micro-batch 4 --accum 12 --warmup 1 --steps 3
+          --dtype f32 --ssd serial --checkpointing false --muon true
+      # The analytic activation estimate is 21% smaller, so also test whether
+      # the wider model can use batch 6 without the severe thrashing seen above.
+      - name: Vulkan wide-turbo 640x12 — micro-batch 6
+        working-directory: experiments/single-stream
+        run: >-
+          cargo run --manifest-path ../../Cargo.toml --release
+          --no-default-features --features vulkan --example train_bench --
+          --model wide-turbo
           --micro-batch 6 --accum 8 --warmup 1 --steps 3 --dtype f32
           --ssd serial --checkpointing false --muon true
 

@@ -18,6 +18,8 @@ use quasar::train::{Optim, Run};
 #[derive(Parser)]
 #[command(about = "Measure a few synchronized tiny-turbo training steps")]
 struct Args {
+    #[arg(long, value_enum, default_value_t = BenchModel::TinyTurbo)]
+    model: BenchModel,
     #[arg(long, default_value_t = 6)]
     micro_batch: usize,
     #[arg(long, default_value_t = 8)]
@@ -50,6 +52,28 @@ enum Dtype {
     Bf16,
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum BenchModel {
+    TinyTurbo,
+    WideTurbo,
+}
+
+impl BenchModel {
+    fn config(self) -> Model {
+        let mut cfg = Model::tiny_turbo();
+        if matches!(self, Self::WideTurbo) {
+            // Keep the parameter and FLOP budgets of 512 x 20, but issue fewer
+            // sequential layers and give each GEMM enough width to occupy the
+            // GPU. Ten attention heads preserve a 64-wide attention head.
+            cfg.d_model = 640;
+            cfg.n_layers = 12;
+            cfg.attn_heads = 10;
+        }
+        cfg.validate().expect("benchmark model must be valid");
+        cfg
+    }
+}
+
 impl From<Dtype> for FloatDType {
     fn from(value: Dtype) -> Self {
         match value {
@@ -76,7 +100,7 @@ fn main() -> Result<()> {
     assert!(args.accum > 0, "accum must be positive");
     assert!(args.steps > 0, "at least one measured step is required");
 
-    let cfg = Model::tiny_turbo();
+    let cfg = args.model.config();
     let mut base_device = Device::default();
     base_device.configure(DeviceConfig::default().float_dtype(FloatDType::from(args.dtype)))?;
     let device = base_device.clone().autodiff();
@@ -96,8 +120,14 @@ fn main() -> Result<()> {
     let tokens_per_step = args.micro_batch * args.accum * cfg.seq_len;
 
     println!(
-        "bench device={base_device:?} model=tiny-turbo dtype={:?} micro_batch={} accum={} ssd={:?} checkpointing={} muon={} tokens/step={tokens_per_step}",
-        args.dtype, args.micro_batch, args.accum, args.ssd, args.checkpointing, args.muon
+        "bench device={base_device:?} model={:?} dtype={:?} micro_batch={} accum={} ssd={:?} checkpointing={} muon={} tokens/step={tokens_per_step}",
+        args.model,
+        args.dtype,
+        args.micro_batch,
+        args.accum,
+        args.ssd,
+        args.checkpointing,
+        args.muon
     );
 
     for step in 0..args.warmup {
@@ -129,6 +159,26 @@ fn main() -> Result<()> {
         "result median_seconds={median:.3} throughput={throughput:.0} tok/s effective={tflops:.2} TFLOP/s"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wide_candidate_trades_depth_for_width_without_changing_work() {
+        let narrow = BenchModel::TinyTurbo.config();
+        let wide = BenchModel::WideTurbo.config();
+
+        let param_ratio = wide.budget().total as f64 / narrow.budget().total as f64;
+        let flop_ratio = wide.flops_per_token() / narrow.flops_per_token();
+        let activation_ratio = wide.activations(1).total / narrow.activations(1).total;
+
+        assert!((param_ratio - 1.0).abs() < 0.01, "parameter ratio {param_ratio}");
+        assert!((flop_ratio - 1.0).abs() < 0.01, "FLOP ratio {flop_ratio}");
+        assert!(activation_ratio < 0.81, "activation ratio {activation_ratio}");
+        assert_eq!((wide.d_model, wide.n_layers, wide.attn_heads), (640, 12, 10));
+    }
 }
 
 fn tokens(cfg: &Model, batch: usize, device: &Device) -> (Tensor<2, Int>, Tensor<2, Int>) {
