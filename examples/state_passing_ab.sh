@@ -54,7 +54,7 @@ run_bench cubecl-k1-issue 1 1 12
 
 # Keep the full 131,072-token preset under a real training-step and OOM check.
 # Its three-step measured window is still shorter than one minute on the target.
-run_bench cubecl-production 1 1 32
+run_bench cubecl-production 1 0 32
 
 reference_throughput=$(sed -n 's/^result .*throughput=\([0-9][0-9]*\) tok\/s.*/\1/p' \
     "$log_dir/reference-issue.log" | tail -n 1)

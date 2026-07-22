@@ -193,9 +193,26 @@ backward разбит на отдельные `dz/do`, `dqkv`, rotary/bias/angle
 один `[batch, head, chunk]` scan длины 64; forward одновременно меняет layout
 `BNLH → BHNL`, а точный VJP выполняет обратный suffix sum сразу в исходном
 layout. K1 не создаёт дополнительный scratch tensor. Reference доступен через
-`BURN_MAMBA_FUSED_CHUNK_CUMSUM=0`, поэтому постоянный GPU job теперь измеряет
-три последовательных режима одного binary: reference, только K4 и K4+K1.
-Результат K1 будет зафиксирован только после fresh RX 9070 XT run.
+`BURN_MAMBA_FUSED_CHUNK_CUMSUM=0`, а кандидат включается значением `1`.
+Постоянный GPU job измеряет три последовательных режима одного binary:
+reference, только K4 и K4+K1.
+
+Fresh RX 9070 XT run показал, почему пошаговый gate важен
+([CI run 29917150856](https://github.com/uselessgoddess/quasar/actions/runs/29917150856)):
+
+| режим | median throughput | изменение | peak VRAM |
+| --- | ---: | ---: | ---: |
+| reference K1/K4 | 9 505 tok/s | — | 14.970 GiB |
+| CubeCL K4 | 9 766 tok/s | +2.7% | 14.096 GiB |
+| CubeCL K4+K1 | 9 753 tok/s | −0.1% к K4 | 14.096 GiB |
+| production K4+K1, `4×32` | 9 936 tok/s | OOM-check | 14.096 GiB |
+
+Все три loss-последовательности совпали (`9.9548 → 8.1049 → 6.1827`),
+но K1 оказался внутри шума и не ускорил шаг. Поэтому
+[revision `f08a732d`](https://github.com/konard/burn-mamba/commit/f08a732d0f0d9f3da3aa0d3aceecbeda08414c1f)
+оставляет проверенный K1 opt-in для будущих runtimes, а production использует
+только доказанный K4. Измеряемые окна заняли 19.880, 17.141, 17.158 и
+41.584 s соответственно — каждое короче минуты.
 
 Каждый следующий seam добавляется только после отдельного A/B. Более широкий
 порт считается готовым только если есть:
