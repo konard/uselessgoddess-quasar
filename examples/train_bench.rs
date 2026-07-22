@@ -9,6 +9,7 @@ use std::time::Instant;
 
 use anyhow::Result;
 use burn::prelude::*;
+use burn::tensor::{DeviceConfig, FloatDType};
 use clap::{Parser, ValueEnum};
 use quasar::config::{Model, SsdMode};
 use quasar::model::Quasar;
@@ -25,6 +26,8 @@ struct Args {
     warmup: usize,
     #[arg(long, default_value_t = 1)]
     steps: usize,
+    #[arg(long, value_enum, default_value_t = Dtype::F32)]
+    dtype: Dtype,
     #[arg(long, value_enum, default_value_t = Ssd::Recalculated)]
     ssd: Ssd,
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
@@ -37,6 +40,23 @@ struct Args {
 enum Ssd {
     Serial,
     Recalculated,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum Dtype {
+    F32,
+    F16,
+    Bf16,
+}
+
+impl From<Dtype> for FloatDType {
+    fn from(value: Dtype) -> Self {
+        match value {
+            Dtype::F32 => Self::F32,
+            Dtype::F16 => Self::F16,
+            Dtype::Bf16 => Self::BF16,
+        }
+    }
 }
 
 impl From<Ssd> for SsdMode {
@@ -55,7 +75,8 @@ fn main() -> Result<()> {
     assert!(args.steps > 0, "at least one measured step is required");
 
     let cfg = Model::tiny_turbo();
-    let base_device = Device::default();
+    let mut base_device = Device::default();
+    base_device.configure(DeviceConfig::default().float_dtype(FloatDType::from(args.dtype)))?;
     let device = base_device.clone().autodiff();
     let device = if args.checkpointing { device.gradient_checkpointing() } else { device };
     device.seed(1337);
@@ -73,8 +94,8 @@ fn main() -> Result<()> {
     let tokens_per_step = args.micro_batch * args.accum * cfg.seq_len;
 
     println!(
-        "bench device={base_device:?} model=tiny-turbo micro_batch={} accum={} ssd={:?} checkpointing={} muon={} tokens/step={tokens_per_step}",
-        args.micro_batch, args.accum, args.ssd, args.checkpointing, args.muon
+        "bench device={base_device:?} model=tiny-turbo dtype={:?} micro_batch={} accum={} ssd={:?} checkpointing={} muon={} tokens/step={tokens_per_step}",
+        args.dtype, args.micro_batch, args.accum, args.ssd, args.checkpointing, args.muon
     );
 
     for step in 0..args.warmup {
@@ -138,5 +159,6 @@ fn optimizer_step(
     model = optim.step(3e-3, model);
     device.sync()?;
     let loss = logged_loss.unwrap().div_scalar(accum as f64).into_scalar::<f32>();
+    anyhow::ensure!(loss.is_finite(), "training produced a non-finite loss");
     Ok((model, loss))
 }
