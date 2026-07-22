@@ -1,0 +1,577 @@
+use super::*;
+use burn::module::Param;
+use burn::tensor::Distribution;
+
+type Device = burn::prelude::Device;
+
+/// Random inputs for the single-SSD. `da` is drawn from a
+/// negative-mean distribution so the implied per-token decay `exp(da)`
+/// stays in `(0, 1]`. `gamma` and `scale` are non-negative (matching
+/// `Δ·σ(λ)`-style outputs of `helpers::trapezoidal_coefficients`).
+#[allow(clippy::too_many_arguments)]
+fn random_input(
+    batch: usize,
+    nchunks: usize,
+    chunk_len: usize,
+    mimo_rank: usize,
+    nheads: usize,
+    per_head_dim: usize,
+    state_rank: usize,
+    random_init: bool,
+    device: &Device,
+) -> (
+    Tensor<6>, // v
+    Tensor<6>, // b
+    Tensor<6>, // c
+    Tensor<4>, // da
+    Tensor<4>, // gamma
+    Tensor<4>, // scale
+    Tensor<4>, // initial_state
+) {
+    let v = Tensor::<6>::random(
+        [batch, nchunks, chunk_len, mimo_rank, nheads, per_head_dim],
+        Distribution::Normal(0.0, 1.0),
+        device,
+    );
+    let b = Tensor::<6>::random(
+        [batch, nchunks, chunk_len, mimo_rank, nheads, state_rank],
+        Distribution::Normal(0.0, 1.0),
+        device,
+    );
+    let c = Tensor::<6>::random(
+        [batch, nchunks, chunk_len, mimo_rank, nheads, state_rank],
+        Distribution::Normal(0.0, 1.0),
+        device,
+    );
+    let da = Tensor::<4>::random(
+        [batch, nchunks, chunk_len, nheads],
+        Distribution::Normal(-0.5, 0.1),
+        device,
+    );
+    let gamma = Tensor::<4>::random(
+        [batch, nchunks, chunk_len, nheads],
+        Distribution::Uniform(0.05, 0.5),
+        device,
+    );
+    let scale = Tensor::<4>::random(
+        [batch, nchunks, chunk_len, nheads],
+        Distribution::Uniform(0.05, 0.5),
+        device,
+    );
+    // Random (general case) or zero (fresh-start) initial merged-form state
+    // per `random_init`, covering the whole {zero, random} dimension.
+    let initial_state = if random_init {
+        Tensor::<4>::random(
+            [batch, nheads, per_head_dim, state_rank],
+            Distribution::Normal(0.0, 0.1),
+            device,
+        )
+    } else {
+        Tensor::<4>::zeros([batch, nheads, per_head_dim, state_rank], device)
+    };
+    (v, b, c, da, gamma, scale, initial_state)
+}
+
+struct Inputs {
+    v: Param<Tensor<6>>,
+    b: Param<Tensor<6>>,
+    c: Param<Tensor<6>>,
+    da: Param<Tensor<4>>,
+    gamma: Param<Tensor<4>>,
+    scale: Param<Tensor<4>>,
+    initial_state: Param<Tensor<4>>,
+}
+
+impl Inputs {
+    #[allow(clippy::too_many_arguments)]
+    fn from_inner(
+        v: Tensor<6>,
+        b: Tensor<6>,
+        c: Tensor<6>,
+        da: Tensor<4>,
+        gamma: Tensor<4>,
+        scale: Tensor<4>,
+        initial_state: Tensor<4>,
+    ) -> Self {
+        Self {
+            v: Param::from_tensor(Tensor::from_inner(v)),
+            b: Param::from_tensor(Tensor::from_inner(b)),
+            c: Param::from_tensor(Tensor::from_inner(c)),
+            da: Param::from_tensor(Tensor::from_inner(da)),
+            gamma: Param::from_tensor(Tensor::from_inner(gamma)),
+            scale: Param::from_tensor(Tensor::from_inner(scale)),
+            initial_state: Param::from_tensor(Tensor::from_inner(initial_state)),
+        }
+    }
+
+    fn ssd_input(&self) -> Mamba3SingleSsdInput {
+        Mamba3SingleSsdInput {
+            v_bnlmhp: self.v.val(),
+            b_bnlmhr: self.b.val(),
+            c_bnlmhr: self.c.val(),
+            da_bnlh: self.da.val(),
+            gamma_bnlh: self.gamma.val(),
+            scale_bnlh: self.scale.val(),
+            initial_state_bhpr: self.initial_state.val(),
+            // Serial asserts this is None — see single_ssd_serial.
+            init_state_hpr: None,
+        }
+    }
+}
+
+struct PathRun {
+    y: Tensor<6>,
+    state: Tensor<4>,
+    d_v: Tensor<6>,
+    d_b: Tensor<6>,
+    d_c: Tensor<6>,
+    d_da: Tensor<4>,
+    d_gamma: Tensor<4>,
+    d_scale: Tensor<4>,
+    d_init_state: Tensor<4>,
+}
+
+fn loss_from_outputs(
+    y_bnlmhp: Tensor<6>,
+    final_state_bhpr: Tensor<4>,
+    y_head: Tensor<6>,
+    s_head: Tensor<4>,
+) -> Tensor<1> {
+    let y_head = Tensor::from_inner(y_head);
+    let s_head = Tensor::from_inner(s_head);
+    (y_bnlmhp * y_head).sum() + (final_state_bhpr * s_head).sum()
+}
+
+fn run_path(path: Mamba3SsdPath, inputs: &Inputs, y_head: Tensor<6>, s_head: Tensor<4>) -> PathRun {
+    let (y, state) = inputs.ssd_input().run(&path);
+    let y_inner = y.clone().inner();
+    let state_inner = state.clone().inner();
+    let loss = loss_from_outputs(y, state, y_head, s_head);
+    let grads = loss.backward();
+    PathRun {
+        y: y_inner,
+        state: state_inner,
+        d_v: inputs.v.val().grad(&grads).expect("grad v"),
+        d_b: inputs.b.val().grad(&grads).expect("grad b"),
+        d_c: inputs.c.val().grad(&grads).expect("grad c"),
+        d_da: inputs.da.val().grad(&grads).expect("grad da"),
+        d_gamma: inputs.gamma.val().grad(&grads).expect("grad gamma"),
+        d_scale: inputs.scale.val().grad(&grads).expect("grad scale"),
+        d_init_state: inputs
+            .initial_state
+            .val()
+            .grad(&grads)
+            .expect("grad initial_state"),
+    }
+}
+
+fn run_single_scan(
+    inputs: &Inputs,
+    y_head: Tensor<6>,
+    s_head: Tensor<4>,
+    primitive_reference: bool,
+) -> PathRun {
+    let args = || {
+        (
+            inputs.v.val(),
+            inputs.da.val(),
+            inputs.b.val(),
+            inputs.c.val(),
+            inputs.gamma.val(),
+            inputs.scale.val(),
+            inputs.initial_state.val(),
+        )
+    };
+    let (y, state) = if primitive_reference {
+        let (v, da, b, c, gamma, scale, initial) = args();
+        crate::mamba3::single_ssd_scan::single_ssd_scan_reference(
+            v, da, b, c, gamma, scale, initial,
+        )
+    } else {
+        let (v, da, b, c, gamma, scale, initial) = args();
+        crate::mamba3::single_ssd_scan::single_ssd_scan(v, da, b, c, gamma, scale, initial)
+    };
+    let y_inner = y.clone().inner();
+    let state_inner = state.clone().inner();
+    let loss = loss_from_outputs(y, state, y_head, s_head);
+    let grads = loss.backward();
+    PathRun {
+        y: y_inner,
+        state: state_inner,
+        d_v: inputs.v.val().grad(&grads).expect("grad v"),
+        d_b: inputs.b.val().grad(&grads).expect("grad b"),
+        d_c: inputs.c.val().grad(&grads).expect("grad c"),
+        d_da: inputs.da.val().grad(&grads).expect("grad da"),
+        d_gamma: inputs.gamma.val().grad(&grads).expect("grad gamma"),
+        d_scale: inputs.scale.val().grad(&grads).expect("grad scale"),
+        d_init_state: inputs
+            .initial_state
+            .val()
+            .grad(&grads)
+            .expect("grad initial_state"),
+    }
+}
+
+fn assert_path_runs_agree(label: &str, a: &PathRun, b: &PathRun, val_tol: f32, grad_tol: f32) {
+    use crate::utils::test_helpers::max_abs_diff;
+    let mut failures: Vec<String> = Vec::new();
+    macro_rules! check_inner {
+        ($field:ident, $name:expr, $tol:expr) => {{
+            let d = max_abs_diff(a.$field.clone(), b.$field.clone());
+            eprintln!("{:>22} {:>14} | max abs diff = {:>10.6}", label, $name, d);
+            if d >= $tol {
+                failures.push(format!(
+                    "{}: {} max abs diff = {:.6} (tol {})",
+                    label, $name, d, $tol
+                ));
+            }
+        }};
+    }
+    check_inner!(y, "y", val_tol);
+    check_inner!(state, "final_state", val_tol);
+    check_inner!(d_v, "grad v", grad_tol);
+    check_inner!(d_b, "grad b", grad_tol);
+    check_inner!(d_c, "grad c", grad_tol);
+    check_inner!(d_da, "grad da", grad_tol);
+    check_inner!(d_gamma, "grad gamma", grad_tol);
+    check_inner!(d_scale, "grad scale", grad_tol);
+    check_inner!(d_init_state, "grad init_state", grad_tol);
+    if !failures.is_empty() && a.y.dims().iter().product::<usize>() <= 64 {
+        eprintln!(
+            "{label} reference y: {:?}",
+            a.y.clone().into_data().to_vec::<f32>().unwrap()
+        );
+        eprintln!(
+            "{label} candidate y: {:?}",
+            b.y.clone().into_data().to_vec::<f32>().unwrap()
+        );
+        eprintln!(
+            "{label} reference d_v: {:?}",
+            a.d_v.clone().into_data().to_vec::<f32>().unwrap()
+        );
+        eprintln!(
+            "{label} candidate d_v: {:?}",
+            b.d_v.clone().into_data().to_vec::<f32>().unwrap()
+        );
+    }
+    assert!(
+        failures.is_empty(),
+        "single-ssd path mismatches:\n  {}",
+        failures.join("\n  ")
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_minimal_matches_serial(
+    batch: usize,
+    nchunks: usize,
+    chunk_len: usize,
+    mimo_rank: usize,
+    nheads: usize,
+    per_head_dim: usize,
+    state_rank: usize,
+    random_init: bool,
+) {
+    let device: Device = Default::default();
+    let (v, b, c, da, gamma, scale, init) = random_input(
+        batch,
+        nchunks,
+        chunk_len,
+        mimo_rank,
+        nheads,
+        per_head_dim,
+        state_rank,
+        random_init,
+        &device,
+    );
+
+    let y_head = Tensor::<6>::random(
+        [batch, nchunks, chunk_len, mimo_rank, nheads, per_head_dim],
+        Distribution::Normal(0.0, 1.0),
+        &device,
+    );
+    let s_head = Tensor::<4>::random(
+        [batch, nheads, per_head_dim, state_rank],
+        Distribution::Normal(0.0, 1.0),
+        &device,
+    );
+
+    let inputs_min = Inputs::from_inner(
+        v.clone(),
+        b.clone(),
+        c.clone(),
+        da.clone(),
+        gamma.clone(),
+        scale.clone(),
+        init.clone(),
+    );
+    let inputs_ser = Inputs::from_inner(
+        v.clone(),
+        b.clone(),
+        c.clone(),
+        da.clone(),
+        gamma.clone(),
+        scale.clone(),
+        init.clone(),
+    );
+    let inputs_rec = Inputs::from_inner(v, b, c, da, gamma, scale, init);
+
+    let r_min = run_path(
+        Mamba3SsdPath::Minimal(Some(chunk_len)),
+        &inputs_min,
+        y_head.clone(),
+        s_head.clone(),
+    );
+    let r_ser = run_path(
+        Mamba3SsdPath::Serial(Some(chunk_len)),
+        &inputs_ser,
+        y_head.clone(),
+        s_head.clone(),
+    );
+    let r_rec = run_path(
+        Mamba3SsdPath::SerialRecalculated(Some(chunk_len)),
+        &inputs_rec,
+        y_head,
+        s_head,
+    );
+
+    // Same algorithm, different schedule / backward: stricter on values
+    // (1e-4), moderate on gradients (1e-3) — same tolerances as the
+    // original-form SSD-path agreement tests.
+    assert_path_runs_agree("Minimal vs Serial", &r_min, &r_ser, 1e-4, 1e-3);
+    assert_path_runs_agree("Minimal vs SerialRecalculated", &r_min, &r_rec, 1e-4, 1e-3);
+}
+
+#[test]
+fn single_ssd_paths_agree_siso() {
+    run_minimal_matches_serial(2, 3, 4, 1, 2, 8, 8, true);
+}
+
+#[test]
+fn single_ssd_paths_agree_siso_zero_init() {
+    run_minimal_matches_serial(2, 3, 4, 1, 2, 8, 8, false);
+}
+
+#[test]
+fn single_ssd_paths_agree_mimo() {
+    run_minimal_matches_serial(2, 3, 4, 2, 2, 8, 8, true);
+}
+
+#[test]
+fn single_ssd_paths_agree_mimo_zero_init() {
+    run_minimal_matches_serial(2, 3, 4, 2, 2, 8, 8, false);
+}
+
+#[test]
+fn single_ssd_paths_agree_single_chunk() {
+    run_minimal_matches_serial(2, 1, 4, 1, 2, 8, 8, true);
+}
+
+#[test]
+fn single_ssd_paths_agree_single_chunk_zero_init() {
+    run_minimal_matches_serial(2, 1, 4, 1, 2, 8, 8, false);
+}
+
+#[cfg(not(feature = "backend-cpu"))]
+#[test]
+fn fused_single_scan_matches_serial_values_and_gradients() {
+    let (batch, nchunks, chunk_len, mimo_rank, nheads, per_head_dim, state_rank) =
+        (1, 2, 2, 1, 1, 2, 2);
+    let device: Device = Default::default();
+    let (v, b, c, da, gamma, scale, init) = random_input(
+        batch,
+        nchunks,
+        chunk_len,
+        mimo_rank,
+        nheads,
+        per_head_dim,
+        state_rank,
+        true,
+        &device,
+    );
+    let y_head = Tensor::<6>::random(
+        [batch, nchunks, chunk_len, mimo_rank, nheads, per_head_dim],
+        Distribution::Normal(0.0, 1.0),
+        &device,
+    );
+    let s_head = Tensor::<4>::random(
+        [batch, nheads, per_head_dim, state_rank],
+        Distribution::Normal(0.0, 1.0),
+        &device,
+    );
+    let reference_inputs = Inputs::from_inner(
+        v.clone(),
+        b.clone(),
+        c.clone(),
+        da.clone(),
+        gamma.clone(),
+        scale.clone(),
+        init.clone(),
+    );
+    let scan_inputs = Inputs::from_inner(v, b, c, da, gamma, scale, init);
+
+    eprintln!("running five-stage serial reference");
+    let reference = run_path(
+        Mamba3SsdPath::Serial(Some(chunk_len)),
+        &reference_inputs,
+        y_head.clone(),
+        s_head.clone(),
+    );
+    eprintln!("running fused single scan candidate");
+    let scan = run_single_scan(&scan_inputs, y_head, s_head, false);
+    assert_path_runs_agree("Serial vs fused single scan", &reference, &scan, 1e-4, 1e-3);
+}
+
+/// Regression for the production failure observed on a 1,024-token sequence.
+/// Reconstructing state through every inverse decay amplifies fp32 cancellation
+/// until the custom backward emits infinities after the first optimizer step.
+#[cfg(not(feature = "backend-cpu"))]
+#[test]
+fn fused_single_scan_long_decay_matches_serial_and_stays_finite() {
+    let (batch, nchunks, chunk_len, mimo_rank, nheads, per_head_dim, state_rank) =
+        (1, 16, 64, 1, 1, 1, 1);
+    let device: Device = Default::default();
+    let (v, b, c, da, gamma, scale, init) = random_input(
+        batch,
+        nchunks,
+        chunk_len,
+        mimo_rank,
+        nheads,
+        per_head_dim,
+        state_rank,
+        true,
+        &device,
+    );
+    let reference_inputs = Inputs::from_inner(
+        v.clone(),
+        b.clone(),
+        c.clone(),
+        da.clone(),
+        gamma.clone(),
+        scale.clone(),
+        init.clone(),
+    );
+    let scan_inputs = Inputs::from_inner(v, b, c, da, gamma, scale, init);
+    let y_head = Tensor::<6>::ones(
+        [batch, nchunks, chunk_len, mimo_rank, nheads, per_head_dim],
+        &device,
+    );
+    let s_head = Tensor::<4>::ones([batch, nheads, per_head_dim, state_rank], &device);
+    let reference = run_path(
+        Mamba3SsdPath::Serial(Some(chunk_len)),
+        &reference_inputs,
+        y_head.clone(),
+        s_head.clone(),
+    );
+    let run = run_single_scan(&scan_inputs, y_head, s_head, false);
+
+    assert_path_runs_agree(
+        "Serial vs long fused single scan",
+        &reference,
+        &run,
+        1e-4,
+        1e-3,
+    );
+    let finite = |values: Vec<f32>| values.into_iter().all(f32::is_finite);
+    for (name, finite) in [
+        ("v", finite(run.d_v.into_data().to_vec().unwrap())),
+        ("b", finite(run.d_b.into_data().to_vec().unwrap())),
+        ("c", finite(run.d_c.into_data().to_vec().unwrap())),
+        ("da", finite(run.d_da.into_data().to_vec().unwrap())),
+        ("gamma", finite(run.d_gamma.into_data().to_vec().unwrap())),
+        ("scale", finite(run.d_scale.into_data().to_vec().unwrap())),
+        (
+            "initial_state",
+            finite(run.d_init_state.into_data().to_vec().unwrap()),
+        ),
+    ] {
+        assert!(finite, "fused scan gradient {name} must stay finite");
+    }
+}
+
+#[cfg(feature = "backend-cpu")]
+#[test]
+fn fused_single_scan_cube_matches_primitive_values_and_gradients() {
+    let (batch, nchunks, chunk_len, mimo_rank, nheads, per_head_dim, state_rank) =
+        (1, 3, 3, 1, 1, 2, 2);
+    let device: Device = Default::default();
+    let (v, b, c, da, gamma, scale, init) = random_input(
+        batch,
+        nchunks,
+        chunk_len,
+        mimo_rank,
+        nheads,
+        per_head_dim,
+        state_rank,
+        true,
+        &device,
+    );
+    let y_head = Tensor::<6>::random(
+        [batch, nchunks, chunk_len, mimo_rank, nheads, per_head_dim],
+        Distribution::Normal(0.0, 1.0),
+        &device,
+    );
+    let s_head = Tensor::<4>::random(
+        [batch, nheads, per_head_dim, state_rank],
+        Distribution::Normal(0.0, 1.0),
+        &device,
+    );
+    let reference_inputs = Inputs::from_inner(
+        v.clone(),
+        b.clone(),
+        c.clone(),
+        da.clone(),
+        gamma.clone(),
+        scale.clone(),
+        init.clone(),
+    );
+    let scan_inputs = Inputs::from_inner(v, b, c, da, gamma, scale, init);
+    let reference = run_single_scan(&reference_inputs, y_head.clone(), s_head.clone(), true);
+    let scan = run_single_scan(&scan_inputs, y_head, s_head, false);
+    assert_path_runs_agree(
+        "Primitive vs Cube single scan",
+        &reference,
+        &scan,
+        1e-4,
+        1e-3,
+    );
+}
+
+#[cfg(feature = "backend-cpu")]
+#[test]
+fn fused_single_scan_cube_multichunk_values_match_primitive() {
+    use crate::utils::test_helpers::max_abs_diff;
+
+    let (batch, nchunks, chunk_len, mimo_rank, nheads, per_head_dim, state_rank) =
+        (1, 2, 2, 1, 1, 2, 2);
+    let device: Device = Default::default();
+    let (v, b, c, da, gamma, scale, init) = random_input(
+        batch,
+        nchunks,
+        chunk_len,
+        mimo_rank,
+        nheads,
+        per_head_dim,
+        state_rank,
+        true,
+        &device,
+    );
+    let reference = crate::mamba3::single_ssd_scan::single_ssd_scan_reference(
+        v.clone(),
+        da.clone(),
+        b.clone(),
+        c.clone(),
+        gamma.clone(),
+        scale.clone(),
+        init.clone(),
+    );
+    let candidate =
+        crate::mamba3::single_ssd_scan::single_ssd_scan(v, da, b, c, gamma, scale, init);
+    let y_diff = max_abs_diff(reference.0, candidate.0);
+    let state_diff = max_abs_diff(reference.1, candidate.1);
+    assert!(y_diff < 1e-4, "multi-chunk y max abs diff: {y_diff}");
+    assert!(
+        state_diff < 1e-4,
+        "multi-chunk final state max abs diff: {state_diff}"
+    );
+}
